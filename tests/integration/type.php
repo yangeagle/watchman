@@ -4,8 +4,8 @@
 
 class TypeExprTestCase extends WatchmanTestCase {
   function testTypeExpr() {
-    $dir = PhutilDirectoryFixture::newEmptyFixture();
-    $root = realpath($dir->getPath());
+    $dir = new WatchmanDirectoryFixture();
+    $root = $dir->getPath();
 
     touch("$root/foo.c");
     mkdir("$root/subdir");
@@ -20,14 +20,29 @@ class TypeExprTestCase extends WatchmanTestCase {
 
     $files = $res['files'];
     sort($files);
-    $this->assertEqual(array('foo.c', 'subdir/bar.txt'), $files);
+    $this->assertEqualFileList(array('foo.c', 'subdir/bar.txt'), $files);
 
     $res = $this->watchmanCommand('query', $root, array(
       'expression' => array('type', 'd'),
-      'fields' => array('name'),
+      'fields' => array('name', 'type'),
     ));
 
-    $this->assertEqual(array('subdir'), $res['files']);
+    $this->assertEqual(array(
+        array('name' => 'subdir', 'type' => 'd')
+      ), $res['files']);
+
+    $res = $this->watchmanCommand('query', $root, array(
+      'expression' => array('type', 'f'),
+      'fields' => array('name', 'type'),
+    ));
+
+    usort($res['files'], function ($a, $b) {
+      return strcmp($a['name'], $b['name']);
+    });
+    $this->assertEqual(array(
+        array('name' => 'foo.c', 'type' => 'f'),
+        array('name' => w_normalize_filename('subdir/bar.txt'), 'type' => 'f')
+      ), $res['files']);
 
     $res = $this->watchmanCommand('query', $root, array(
       'expression' => array('type', 'x'),

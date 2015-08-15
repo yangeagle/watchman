@@ -84,7 +84,8 @@ static json_t *build_legacy_trigger(
   json_t *command;
   char *errmsg;
   uint32_t next_arg = 0;
-  uint32_t i, n;
+  uint32_t i;
+  size_t n;
   w_query *query;
 
   trig = json_pack("{s:O, s:b, s:[s, s, s, s, s]}",
@@ -149,8 +150,14 @@ static bool parse_redirection(const char **name_p, int *flags,
   *flags = O_CREAT|O_CLOEXEC|O_WRONLY;
 
   if (name[1] == '>') {
+#ifdef _WIN32
+    ignore_result(asprintf(errmsg,
+      "Windows does not support O_APPEND"));
+    return false;
+#else
     *flags |= O_APPEND;
     *name_p = name + 2;
+#endif
   } else {
     *flags |= O_TRUNC;
     *name_p = name + 1;
@@ -188,7 +195,7 @@ struct watchman_trigger_command *w_build_trigger_from_def(
   w_root_t *root, json_t *trig, char **errmsg)
 {
   struct watchman_trigger_command *cmd;
-  json_t *ele, *query;
+  json_t *ele, *query, *relative_root;
   json_int_t jint;
   const char *name = NULL;
 
@@ -203,6 +210,11 @@ struct watchman_trigger_command *w_build_trigger_from_def(
 
   query = json_pack("{s:O}", "expression",
       json_object_get(cmd->definition, "expression"));
+  relative_root = json_object_get(cmd->definition, "relative_root");
+  if (relative_root) {
+    json_object_set_nocheck(query, "relative_root", relative_root);
+  }
+
   cmd->query = w_query_parse(root, query, errmsg);
   json_decref(query);
 
@@ -265,7 +277,7 @@ struct watchman_trigger_command *w_build_trigger_from_def(
     w_trigger_command_free(cmd);
     return NULL;
   }
-  cmd->max_files_stdin = jint;
+  cmd->max_files_stdin = (uint32_t)jint;
 
   json_unpack(trig, "{s:s}", "stdout", &cmd->stdout_name);
   json_unpack(trig, "{s:s}", "stderr", &cmd->stderr_name);

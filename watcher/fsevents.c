@@ -21,61 +21,6 @@ struct fsevents_root_state {
   struct watchman_fsevent *fse_head, *fse_tail;
 };
 
-// The ignore logic is to stop recursion of grandchildren or later
-// generations than an ignored dir.  We allow the direct children
-// of an ignored dir, but no further down.
-static bool is_ignored(w_root_t *root, const char *path, uint32_t pathlen)
-{
-  w_ht_iter_t i;
-
-  if (w_ht_first(root->ignore_dirs, &i)) do {
-    w_string_t *ign = w_ht_val_ptr(i.value);
-
-    if (pathlen < ign->len) {
-      continue;
-    }
-
-    if (memcmp(ign->buf, path, ign->len) == 0) {
-      if (ign->len == pathlen) {
-        // Exact match
-        return true;
-      }
-
-      if (path[ign->len] == '/') {
-        // prefix match
-        return true;
-      }
-    }
-
-  } while (w_ht_next(root->ignore_dirs, &i));
-
-  if (w_ht_first(root->ignore_vcs, &i)) do {
-    w_string_t *ign = w_ht_val_ptr(i.value);
-
-    if (pathlen <= ign->len) {
-      continue;
-    }
-
-    if (memcmp(ign->buf, path, ign->len) == 0) {
-      // prefix matches, but it isn't a parent
-      if (path[ign->len] != '/') {
-        continue;
-      }
-
-      // If we find any '/' in the remainder of the path, then we should
-      // ignore it.  Otherwise we allow it.
-      path += ign->len + 1;
-      pathlen -= ign->len + 1;
-      if (memchr(path, '/', pathlen)) {
-        return true;
-      }
-    }
-
-  } while (w_ht_next(root->ignore_vcs, &i));
-
-  return false;
-}
-
 static void fse_callback(ConstFSEventStreamRef streamRef,
    void *clientCallBackInfo,
    size_t numEvents,
@@ -110,7 +55,7 @@ static void fse_callback(ConstFSEventStreamRef streamRef,
       len--;
     }
 
-    if (is_ignored(root, paths[i], len)) {
+    if (w_is_ignored(root, paths[i], len)) {
       continue;
     }
 
@@ -151,9 +96,9 @@ static void fse_pipe_callback(CFFileDescriptorRef fdref,
 
   unused_parameter(fdref);
   unused_parameter(callBackTypes);
+  unused_parameter(root);
 
-  w_log(W_LOG_DBG, "fse_thread[%.*s]: pipe signalled\n",
-      root->root_path->len, root->root_path->buf);
+  w_log(W_LOG_DBG, "pipe signalled\n");
   CFRunLoopStop(CFRunLoopGetCurrent());
 }
 
@@ -167,6 +112,10 @@ static void *fsevents_thread(void *arg)
   CFFileDescriptorContext fdctx;
   CFFileDescriptorRef fdref;
   struct fsevents_root_state *state = root->watch;
+  double latency;
+
+  w_set_thread_name("fsevents %.*s", root->root_path->len,
+      root->root_path->buf);
 
   // Block until fsevents_root_start is waiting for our initialization
   pthread_mutex_lock(&state->fse_mtx);
@@ -210,9 +159,16 @@ static void *fsevents_thread(void *arg)
   CFArrayAppendValue(parray, cpath);
   CFRelease(cpath);
 
+  latency = cfg_get_double(root, "fsevents_latency", 0.01),
+  w_log(W_LOG_DBG,
+      "FSEventStreamCreate for path %.*s with latency %f seconds\n",
+      root->root_path->len,
+      root->root_path->buf,
+      latency);
+
   fs_stream = FSEventStreamCreate(NULL, fse_callback,
       &ctx, parray, kFSEventStreamEventIdSinceNow,
-      0.0001,
+      latency,
       kFSEventStreamCreateFlagNoDefer|
       kFSEventStreamCreateFlagWatchRoot|
       kFSEventStreamCreateFlagFileEvents);
@@ -227,9 +183,8 @@ static void *fsevents_thread(void *arg)
   if (!FSEventStreamStart(fs_stream)) {
     root->failure_reason = w_string_make_printf(
         "FSEventStreamStart failed, look at your log file %s for "
-        "lines mentioning FSEvents and see "
-        "https://facebook.github.io/watchman/docs/troubleshooting.html#"
-        "fsevents for more information\n", log_name);
+        "lines mentioning FSEvents and see %s#fsevents for more information\n",
+        log_name, cfg_get_trouble_url());
     goto done;
   }
 
@@ -261,8 +216,7 @@ done:
   pthread_cond_signal(&state->fse_cond);
   pthread_mutex_unlock(&state->fse_mtx);
 
-  w_log(W_LOG_DBG, "fse_thread[%.*s] done\n",
-      root->root_path->len, root->root_path->buf);
+  w_log(W_LOG_DBG, "fse_thread done\n");
   w_root_delref(root);
   return NULL;
 }
@@ -430,6 +384,7 @@ static bool fsevents_root_start(watchman_global_watcher_t watcher,
   }
 
   pthread_mutex_unlock(&state->fse_mtx);
+  w_root_delref(root);
   w_log(W_LOG_ERR, "failed to start fsevents thread: %s\n", strerror(err));
   return false;
 }

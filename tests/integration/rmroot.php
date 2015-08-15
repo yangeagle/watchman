@@ -7,17 +7,17 @@ class rmrootTestCase extends WatchmanTestCase {
     if (PHP_OS == 'Linux' && getenv('TRAVIS')) {
       $this->assertSkipped('openvz and inotify unlinks == bad time');
     }
-    $dir = PhutilDirectoryFixture::newEmptyFixture();
-    $top = realpath($dir->getPath());
+    $dir = new WatchmanDirectoryFixture();
+    $top = $dir->getPath();
 
-    $root = "$top/root";
+    $root = $top.DIRECTORY_SEPARATOR."root";
     mkdir($root);
     touch("$root/hello");
 
     $this->watch($root);
     $this->assertFileList($root, array('hello'));
 
-    Filesystem::remove($root);
+    w_rmdir_recursive($root);
 
     $this->assertFileList($root, array());
 
@@ -33,12 +33,18 @@ class rmrootTestCase extends WatchmanTestCase {
       "watch deleted"
     );
 
-    mkdir($root);
+    // Really need to ensure that we mkdir, otherwise the $dir fixture
+    // will throw when the scope unwinds
+    $this->waitFor(
+      function () use ($root) {
+        return @mkdir($root);
+      },
+       10,
+       "mkdir($root) to succeed"
+     );
+
     touch("$root/hello");
 
     $this->assertFileList($root, array());
   }
-
-
 }
-

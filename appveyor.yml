@@ -1,0 +1,24 @@
+version: b{build}
+
+branches:
+  except:
+    - gh-pages
+
+install:
+  - cinst php
+
+build_script:
+  - make
+
+after_build:
+  - make dist
+
+test_script:
+  - PATH=C:\tools\php;%PATH%
+  - "cd node && npm install"
+  - make integration
+
+artifacts:
+  - path: Watchman
+    name: watchman
+    type: zip

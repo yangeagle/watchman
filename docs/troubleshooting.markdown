@@ -6,9 +6,26 @@ category: Troubleshooting
 permalink: docs/troubleshooting.html
 ---
 
-If you've been directed to this page due to an error or warning output from
-Watchman, it typically means that there is some system tuning that you need to
-perform.
+We try to give directed advice in Watchman error diagnostics, which means that
+we will show a link to a section on this page with some context and advice where
+we have enough information to do so.  Some operating systems provide richer
+diagnostic information than others, so we have to resort to more generic
+advice in some cases.
+
+The most common cause of problems is hitting system resource limits.  There are
+finite resources available for filesystem watching, and when they are exceeded
+it can impact performance in the best case or prohibit correct operation in the
+worst case.
+
+## Ensure that you are on the best available version
+
+It is generally a good idea to make sure that you are using the latest
+version of the software, so that you avoid any known issues.
+
+If you are running a pre-built binary provided by your operating system
+distribution system, there is a chance that you'll need to build the
+latest version from source.  You can find instructions for this in
+[the installation section](/watchman/docs/install.html).
 
 ## Recrawl
 
@@ -38,6 +55,21 @@ system administrator should review the workload for your system and the
 /watchman/docs/install.html#system-specific-preparation) and raise your limits
 accordingly.
 
+### kFSEventStreamEventFlagUserDropped
+
+OS X has a similar internal limit and behavior when that limit is exceeded.
+If you're encountering a message like:
+
+```
+Recrawled this watch 1 times, most recently because:
+/some/path: kFSEventStreamEventFlagUserDropped
+```
+
+then you are hitting the limits of your system.  There is no direct control
+over the limit, but starting in Watchman 3.2 you may increase the
+[fsevents_latency](/watchman/docs/config.html#fsevents-latency)
+parameter in your `.watchmanconfig` file.
+
 ### I've changed my limits, how can I clear the warning?
 
 The warning will stick until you cancel the watch and reinstate it, or restart
@@ -46,16 +78,24 @@ shutdown-server` and re-establish your watch on your next watchman query.
 
 ## Where are the logs?
 
-If you configured watchman using `--enable-statedir=<STATEDIR>` the
-default location for logfile will be `<STATEDIR>/<USER>.log`, otherwise it
-will be `<TMPDIR>/.watchman.<USER>.log`.
+Watchman places logs in a file named `<STATEDIR>/<USER>.log`, where `STATEDIR`
+is set at the time that you built watchman.
 
-This location is overridden by the `--logfile` [Server Option](
+If you used the `--enable-statedir=<STATEDIR>` configure option, that will
+be the location that holds your logs.  If not, the default for `STATEDIR`
+will be `<PREFIX>/var/run/watchman`, or for older versions of watchman,
+the logs may be placed in `<TMPDIR>/.watchman.<USER>.log`.
+
+If you're running a `homebrew` build of watchman, you'll find the logs in a
+path named something like
+`/usr/local/Cellar/watchman/3.2.0/var/run/watchman/<USER>.log`.
+
+The default log location may be overridden by the `--logfile` [Server Option](
 /watchman/docs/cli-options.html#server-options).
 
 [Quick note on default locations](
 /watchman/docs/cli-options.html#quick-note-on-default-locations) explains what
-we mean by `<TMPDIR>`, `<USER>` and so on.
+we mean by `<STATEDIR>`, `<TMPDIR>`, `<USER>` and so on.
 
 ## Poison: inotify_add_watch
 
@@ -145,3 +185,37 @@ progressively more invasive:
    set maintained by watchman.
 * Restart the fsevents service: `sudo pkill -9 -x fseventsd`
 * Restart your computer
+
+## Triggers/Subscriptions don't fire on OS X
+
+There is a rare fsevents bug that can prevent any notifications from working
+in directories where the case of the name of a directory in the kernel has
+an inconsistency.
+
+You can test whether this is happening to you by following [the instructions
+for the find-fsevents-bugs tool](
+https://github.com/andreyvit/find-fsevents-bugs).
+
+If it is happening to you, the resolution is to rename the directories
+highlighted by the tool.
+
+You can read more about this issue in the following resources:
+
+* [Knowledge base article for LiveReload](
+http://feedback.livereload.com/knowledgebase/articles/86239-os-x-fsevents-bug-may-prevent-monitoring-of-certai)
+* [issue for the Ruby fsevents module](https://github.com/thibaudgg/rb-fsevent/issues/10)
+* [Open Radar bug report](http://openradar.appspot.com/10207999)
+
+## ReactNative: Watcher took too long to load
+
+There was an issue that was the result of umask affecting the permissions of
+the launchd plist file that Watchman uses to set up your watchman service on OS
+X.  This issue was resolved in Watchman version 3.1.
+
+To update:
+
+```
+watchman shutdown-server
+brew update
+brew reinstall watchman
+```

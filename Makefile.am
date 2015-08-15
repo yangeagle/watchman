@@ -9,7 +9,7 @@ THIRDPARTY_CPPFLAGS = -I$(top_srcdir)/thirdparty/jansson -I$(top_builddir)/third
 JSON_LIB = -L. libwmanjson.a
 
 watchman_CPPFLAGS = $(THIRDPARTY_CPPFLAGS) @IRONMANCFLAGS@ -DWATCHMAN_STATE_DIR='"@WATCHMAN_STATE_DIR@"'
-watchman_LDADD = $(JSON_LIB)
+watchman_LDADD = $(JSON_LIB) libwildmatch.a
 watchman_SOURCES = \
 	argv.c       \
 	envp.c       \
@@ -22,6 +22,10 @@ watchman_SOURCES = \
 	bser.c       \
 	hash.c       \
 	ht.c         \
+	ioprio.c        \
+	stream.c        \
+	stream_stdout.c \
+	stream_unix.c   \
 	cmds/find.c     \
 	cmds/info.c     \
 	cmds/log.c      \
@@ -33,8 +37,10 @@ watchman_SOURCES = \
 	cmds/watch.c    \
 	cmds/debug.c    \
 	query/base.c       \
+	query/dirname.c    \
 	query/parse.c      \
 	query/eval.c       \
+	query/intcompare.c \
 	query/type.c       \
 	query/suffix.c     \
 	query/match.c      \
@@ -44,6 +50,7 @@ watchman_SOURCES = \
 	query/since.c      \
 	query/empty.c      \
 	watcher/fsevents.c \
+	watcher/helper.c   \
 	watcher/inotify.c  \
 	watcher/kqueue.c   \
 	watcher/portfs.c   \
@@ -58,7 +65,7 @@ noinst_HEADERS =   \
 	watchman.h       \
 	watchman_hash.h
 
-noinst_LIBRARIES = libwmanjson.a libtap.a
+noinst_LIBRARIES = libwmanjson.a libtap.a libwildmatch.a
 
 # bundled json library
 libwmanjson_a_CPPFLAGS = $(THIRDPARTY_CPPFLAGS)
@@ -83,9 +90,13 @@ libtap_a_CPPFLAGS = $(THIRDPARTY_CPPFLAGS)
 libtap_a_SOURCES = thirdparty/tap.c
 TAP_LIB = libtap.a
 
+# pattern matching library
+libwildmatch_a_SOURCES = thirdparty/wildmatch/wildmatch.c
+WILDMATCH_LIB = libwildmatch.a
+
 # unit tests
-TESTS = tests/argv.t tests/log.t tests/bser.t
-noinst_PROGRAMS = tests/argv.t tests/log.t tests/bser.t
+TESTS = tests/argv.t tests/log.t tests/bser.t tests/wildmatch.t
+noinst_PROGRAMS = tests/argv.t tests/log.t tests/bser.t tests/wildmatch.t
 
 if HAVE_ARC
 # Run lint and output stuff suitable for feeding into ":make" in vim
@@ -106,7 +117,10 @@ py-install:
 
 # This is invoked via WatchmanIntegrationEngine
 py-tests:
-	time $(PYTHON) $(TESTNAME)
+	$(PYTHON) $(TESTNAME)
+
+py-integration:
+	$(PYTHON) runtests.py
 
 py-clean:
 	-cd python && $(PYTHON) ./setup.py clean --all
@@ -116,6 +130,9 @@ py-build:
 py-tests:
 py-clean:
 py-install:
+py-integration:
+	@echo You need python to run the tests
+	false
 endif
 
 if HAVE_RUBY
@@ -136,8 +153,8 @@ endif
 all-local: py-build rb-build lint
 
 install-exec-local: py-install
-	${INSTALL} -d -m 777 ${WATCHMAN_STATE_DIR}
-	touch ${WATCHMAN_STATE_DIR}/.not-empty
+	${INSTALL} -d -m 777 ${DESTDIR}${WATCHMAN_STATE_DIR}
+	touch ${DESTDIR}${WATCHMAN_STATE_DIR}/.not-empty
 
 clean-local: py-clean rb-clean
 	-find python \( -name '*.py[cdo]' -o -name '*.so' \) -exec rm -f '{}' ';'
@@ -148,8 +165,7 @@ clean-local: py-clean rb-clean
 build-tests: $(TESTS)
 .PHONY: lint build-tests integration py-tests
 # run integration AND unit tests
-integration:
-	arc unit --everything
+integration: all py-integration
 
 tests_argv_t_CPPFLAGS = $(THIRDPARTY_CPPFLAGS)
 tests_argv_t_LDADD = $(JSON_LIB) $(TAP_LIB)
@@ -169,3 +185,7 @@ tests_bser_t_SOURCES = \
 	tests/bser.c \
 	bser.c
 
+tests_wildmatch_t_CPPFLAGS = $(THIRDPARTY_CPPFLAGS)
+tests_wildmatch_t_LDADD = $(JSON_LIB) $(TAP_LIB) $(WILDMATCH_LIB)
+tests_wildmatch_t_SOURCES = \
+	tests/wildmatch_test.c

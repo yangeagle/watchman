@@ -6,26 +6,35 @@
 // for integration tests.
 // Ensures that it is terminated when it is destroyed.
 class WatchmanInstance {
-  private $proc;
-  private $logfile;
-  private $sockname;
-  private $config_file;
-  private $debug = false;
-  private $valgrind = false;
-  private $coverage = false;
-  private $vg_log;
-  private $cg_file;
-  private $sock;
-  private $repo_root;
-  private $logdata = array();
-  private $subdata = array();
+  protected $proc;
+  protected $logfile;
+  protected $sockname;
+  protected $config_file;
+  protected $debug = false;
+  protected $valgrind = false;
+  protected $coverage = false;
+  protected $vg_log;
+  protected $cg_file;
+  protected $sock;
+  protected $repo_root;
+  protected $logdata = array();
+  protected $subdata = array();
   const TIMEOUT = 20;
+
+  private function tempfile() {
+    $temp = tempnam(sys_get_temp_dir(), 'wat');
+    return $temp;
+  }
 
   function __construct($repo_root, $coverage, $config = array()) {
     $this->repo_root = $repo_root;
-    $this->logfile = new TempFile();
-    $this->sockname = new TempFile();
-    $this->config_file = new TempFile();
+    $this->logfile = $this->tempfile();
+    if (phutil_is_windows()) {
+      $this->sockname = "\\\\.\\pipe\\watchman-test-" . uniqid();
+    } else {
+      $this->sockname = $this->tempfile();
+    }
+    $this->config_file = $this->tempfile();
     // PHP is incredibly stupid: there's no direct way to turn array() into '{}'
     // and array('foo' => array('bar', 'baz')) into '{"foo": ["bar", "baz"]}'.
     if ($config === array()) {
@@ -37,10 +46,10 @@ class WatchmanInstance {
 
     if (getenv("WATCHMAN_VALGRIND")) {
       $this->valgrind = true;
-      $this->vg_log = new TempFile();
+      $this->vg_log = $this->tempfile();
     } elseif ($coverage) {
       $this->coverage = true;
-      $this->cg_file = new TempFile();
+      $this->cg_file = $this->tempfile();
     }
 
     $this->request();
@@ -185,11 +194,14 @@ class WatchmanInstance {
   }
 
   function getFullSockName() {
+    if (phutil_is_windows()) {
+      return $this->sockname;
+    }
     return $this->sockname . '.sock';
   }
 
   function start() {
-    $cmd = "./watchman --foreground --sockname=%C.sock --logfile=%s " .
+    $cmd = "%s --foreground --sockname=%s --logfile=%s " .
             "--statefile=%s.state --log-level=2";
     if ($this->valgrind) {
       $cmd = "valgrind --tool=memcheck " .
@@ -207,29 +219,51 @@ class WatchmanInstance {
         "--separate-recs=16 --callgrind-out-file=$this->cg_file " .
         $cmd;
     }
-    $cmd = "WATCHMAN_CONFIG_FILE=%s " . $cmd;
 
-    $cmd = csprintf($cmd, $this->config_file, $this->sockname, $this->logfile,
+    putenv("WATCHMAN_CONFIG_FILE=".$this->config_file);
+
+    $cmd = sprintf($cmd, $this->repo_root . '/watchman',
+      $this->getFullSockName(), $this->logfile,
                     $this->logfile);
 
     $pipes = array();
     $this->proc = proc_open($cmd, array(
-      0 => array('file', '/dev/null', 'r'),
+      0 => array('file', phutil_is_windows() ? 'NUL:' : '/dev/null', 'r'),
       1 => array('file', $this->logfile, 'a'),
       2 => array('file', $this->logfile, 'a'),
-    ), $pipes);
+    ), $pipes, $this->repo_root);
 
     if (!$this->proc) {
       throw new Exception("Failed to spawn $cmd");
     }
 
+    $this->openSock();
+
+    // If you're debugging and want to attach a debugger, then:
+    // `WATCHMAN_DEBUG_WAIT=1 arc test tests/integration/age.php`
+    // then gdb -p or lldb -p with the PID it prints out
+    if (getenv("WATCHMAN_DEBUG_WAIT")) {
+      printf("PID: %d\n", $this->getProcessID());
+      sleep(10);
+    }
+  }
+
+  function openSock() {
     $sockname = $this->getFullSockName();
     $deadline = time() + 5;
     do {
-      if (!file_exists($sockname)) {
-        usleep(30000);
+      if (phutil_is_windows()) {
+        $this->sock = @fopen($this->sockname, 'r+');
+        if (!$this->sock) {
+          usleep(30000);
+        }
+      } else {
+        if (!file_exists($sockname)) {
+          usleep(30000);
+        }
+
+        $this->sock = @fsockopen('unix://' . $sockname);
       }
-      $this->sock = @fsockopen('unix://' . $sockname);
       if ($this->sock) {
         break;
       }
@@ -524,9 +558,14 @@ class WatchmanInstance {
     return $st;
   }
 
-  private function waitForSuspendedState($suspended, $timeout) {
-    $st = proc_get_status($this->proc);
-    $pid = $st['pid'];
+  protected function waitForSuspendedState($suspended, $timeout, $pid = null) {
+    if (phutil_is_windows()) {
+      return true;
+    }
+    if ($pid === null) {
+      $st = proc_get_status($this->proc);
+      $pid = $st['pid'];
+    }
     // The response to proc_get_status has a 'stopped' value, which is
     // ostensibly set to a truthy value if the process is stopped and falsy if
     // it isn't. Why don't we use it, you ask? Well, let me ask you a question
@@ -580,6 +619,7 @@ class WatchmanInstance {
     if (!$this->proc) {
       return;
     }
+    $this->resumeProcess();
     $timeout = $this->valgrind ? 20 : 5;
     if ($this->sock) {
       try {
@@ -611,32 +651,33 @@ class WatchmanInstance {
     if ($this->debug) {
       readfile($this->logfile);
     }
+    $TMP = phutil_is_windows() ? '' : '/tmp/';
     $this->appendLogFile(
       'config',
       $this->config_file,
-      '/tmp/watchman-test.log'
+      $TMP . 'watchman-test.log'
     );
     $this->appendLogFile(
       'output',
       $this->logfile,
-      '/tmp/watchman-test.log'
+      $TMP . 'watchman-test.log'
     );
     if (file_exists($this->vg_log.'.xml')) {
       $this->appendLogFile(
         'valgrind',
         $this->vg_log.'.xml',
-        "/tmp/watchman-valgrind.xml"
+        $TMP . "watchman-valgrind.xml"
       );
     }
     if (file_exists($this->vg_log)) {
       $this->appendLogFile(
         'valgrind',
         $this->vg_log,
-        '/tmp/watchman-valgrind.log'
+        $TMP . 'watchman-valgrind.log'
       );
     }
     if (file_exists($this->cg_file)) {
-      copy($this->cg_file, "/tmp/watchman-callgrind.txt");
+      copy($this->cg_file, $TMP . "/watchman-callgrind.txt");
     }
   }
 
@@ -649,8 +690,12 @@ class WatchmanInstance {
     if (!$st['running']) {
       throw new Exception('watchman process terminated');
     }
-    // SIGSTOP isn't defined on the default PHP shipped with OS X, so use kill
-    execx('kill -STOP %s', $st['pid']);
+    if (phutil_is_windows()) {
+      execx('susres.exe suspend %d', $st['pid']);
+    } else {
+      // SIGSTOP isn't defined on the default PHP shipped with OS X, so use kill
+      execx('kill -STOP %s', $st['pid']);
+    }
     if (!$this->waitForSuspendedState(true, $timeout)) {
       throw new Exception("watchman process didn't stop in $timeout seconds");
     }
@@ -665,8 +710,12 @@ class WatchmanInstance {
     if (!$st['running']) {
       throw new Exception('watchman process terminated');
     }
-    // SIGCONT isn't defined on the default PHP shipped with OS X, so use kill
-    execx('kill -CONT %s', $st['pid']);
+    if (phutil_is_windows()) {
+      execx('susres.exe resume %d', $st['pid']);
+    } else {
+      // SIGCONT isn't defined on the default PHP shipped with OS X, so use kill
+      execx('kill -CONT %s', $st['pid']);
+    }
     if (!$this->waitForSuspendedState(false, $timeout)) {
       throw new Exception("watchman process didn't resume in $timeout seconds");
     }
@@ -677,5 +726,66 @@ class WatchmanInstance {
   }
 
 }
+
+function execx() {
+  $args = func_get_args();
+  printf("# execx: %s\n", json_encode($args));
+  if (count($args) > 1) {
+    $cmd = call_user_func_array('sprintf', $args);
+  } else {
+    $cmd = $args[0];
+  }
+  exec($cmd, $output, $status);
+  if ($status != 0) {
+    throw new Exception("$cmd failed with status $status $output");
+  }
+  return $output;
+}
+
+// This is a helper to avoid having to spawn a new watchman
+// process for every php test that we launch via the python
+// harness
+class PythonProvidedWatchmanInstance extends WatchmanInstance {
+  public function suspendProcess() {
+    $timeout = 5;
+    // SIGSTOP isn't defined on the default PHP shipped with OS X, so use kill
+    execx('kill -STOP %s', $this->pid);
+    if (!$this->waitForSuspendedState(true, $timeout, $this->pid)) {
+      throw new Exception("watchman process didn't stop in $timeout seconds");
+    }
+  }
+
+  public function resumeProcess() {
+    $timeout = 5;
+    // SIGCONT isn't defined on the default PHP shipped with OS X, so use kill
+    execx('kill -CONT %s', $this->pid);
+    if (!$this->waitForSuspendedState(false, $timeout, $this->pid)) {
+      throw new Exception("watchman process didn't resume in $timeout seconds");
+    }
+  }
+
+  function waitForLogOutput($criteria, $timeout = 5) {
+    // We can't find the log file for the python test instance from here,
+    // so the test should run its own instance
+    throw new Exception('you must return a non-empty array from getGlobalConfig');
+  }
+
+  function __construct() {
+    $this->sockname = getenv('WATCHMAN_SOCK');
+  }
+
+  function getFullSockName() {
+    return $this->sockname;
+  }
+
+  function start() {
+    $this->openSock();
+    $this->pid = $this->getProcessID();
+  }
+
+  function terminateProcess() {
+  }
+}
+
 
 // vim:ts=2:sw=2:et:

@@ -87,16 +87,16 @@ void w_mark_dead(pid_t pid)
   w_root_delref(root);
 }
 
-static int prepare_stdin(
+static w_stm_t prepare_stdin(
   struct watchman_trigger_command *cmd,
   w_query_res *res)
 {
   uint32_t n_files;
   char stdin_file_name[WATCHMAN_NAME_MAX];
-  int stdin_fd = -1;
+  w_stm_t stdin_file = NULL;
 
   if (cmd->stdin_style == input_dev_null) {
-    return open("/dev/null", O_RDONLY|O_CLOEXEC);
+    return w_stm_open("/dev/null", O_RDONLY|O_CLOEXEC);
   }
 
   n_files = res->num_results;
@@ -106,18 +106,18 @@ static int prepare_stdin(
   }
 
   /* prepare the input stream for the child process */
-  snprintf(stdin_file_name, sizeof(stdin_file_name), "%s/wmanXXXXXX",
-      watchman_tmp_dir);
-  stdin_fd = w_mkstemp(stdin_file_name);
-  if (stdin_fd == -1) {
-    w_log(W_LOG_ERR, "unable to create a temporary file: %s\n",
-        strerror(errno));
-    return -1;
+  snprintf(stdin_file_name, sizeof(stdin_file_name), "%s%cwmanXXXXXX",
+      watchman_tmp_dir, WATCHMAN_DIR_SEP);
+  stdin_file = w_mkstemp(stdin_file_name);
+  if (!stdin_file) {
+    w_log(W_LOG_ERR, "unable to create a temporary file: %s %s\n",
+        stdin_file_name, strerror(errno));
+    return NULL;
   }
 
   /* unlink the file, we don't need it in the filesystem;
    * we'll pass the fd on to the child as stdin */
-  unlink(stdin_file_name);
+  unlink(stdin_file_name); // FIXME: windows path translation
 
   switch (cmd->stdin_style) {
     case input_json:
@@ -127,34 +127,37 @@ static int prepare_stdin(
 
         if (!w_json_buffer_init(&buffer)) {
           w_log(W_LOG_ERR, "failed to init json buffer\n");
-          close(stdin_fd);
-          return -1;
+          w_stm_close(stdin_file);
+          return NULL;
         }
 
         file_list = w_query_results_to_json(&cmd->field_list,
             n_files, res->results);
-        w_json_buffer_write(&buffer, stdin_fd, file_list, 0);
+        w_log(W_LOG_ERR, "input_json: sending json object to stm\n");
+        if (!w_json_buffer_write(&buffer, stdin_file, file_list, 0)) {
+          w_log(W_LOG_ERR,
+              "input_json: failed to write json data to stream: %s\n",
+              strerror(errno));
+          w_stm_close(stdin_file);
+          return NULL;
+        }
         w_json_buffer_free(&buffer);
         json_decref(file_list);
         break;
       }
     case input_name_list:
       {
-        struct iovec iov[2];
         uint32_t i;
 
-        iov[1].iov_base = "\n";
-        iov[1].iov_len = 1;
-
         for (i = 0; i < n_files; i++) {
-          iov[0].iov_base = (void*)res->results[i].relname->buf;
-          iov[0].iov_len = res->results[i].relname->len;
-          if (writev(stdin_fd, iov, 2) != (ssize_t)iov[0].iov_len + 1) {
+          if (w_stm_write(stdin_file, res->results[i].relname->buf,
+              res->results[i].relname->len) != (int)res->results[i].relname->len
+              || w_stm_write(stdin_file, "\n", 1) != 1) {
             w_log(W_LOG_ERR,
               "write failure while producing trigger stdin: %s\n",
               strerror(errno));
-            close(stdin_fd);
-            return -1;
+            w_stm_close(stdin_file);
+            return NULL;
           }
         }
         break;
@@ -164,8 +167,8 @@ static int prepare_stdin(
       break;
   }
 
-  lseek(stdin_fd, 0, SEEK_SET);
-  return stdin_fd;
+  w_stm_rewind(stdin_file);
+  return stdin_file;
 }
 
 static void spawn_command(w_root_t *root,
@@ -176,21 +179,27 @@ static void spawn_command(w_root_t *root,
   char **envp = NULL;
   uint32_t i = 0;
   int ret;
-  int stdin_fd = -1;
+  w_stm_t stdin_file = NULL;
   json_t *args;
   char **argv = NULL;
   uint32_t env_size;
   posix_spawn_file_actions_t actions;
   posix_spawnattr_t attr;
+#ifndef _WIN32
   sigset_t mask;
+#endif
   long arg_max;
-  uint32_t argspace_remaining;
+  size_t argspace_remaining;
   bool file_overflow = false;
   int result_log_level;
   char clockbuf[128];
-  const char *cwd = NULL;
+  w_string_t *working_dir = NULL;
 
+#ifdef _WIN32
+  arg_max = 32*1024;
+#else
   arg_max = sysconf(_SC_ARG_MAX);
+#endif
 
   if (arg_max <= 0) {
     argspace_remaining = UINT_MAX;
@@ -201,7 +210,14 @@ static void spawn_command(w_root_t *root,
   // Allow some misc working overhead
   argspace_remaining -= 32;
 
-  stdin_fd = prepare_stdin(cmd, res);
+  stdin_file = prepare_stdin(cmd, res);
+  if (!stdin_file) {
+    w_log(W_LOG_ERR, "trigger %.*s:%s %s\n",
+        (int)root->root_path->len,
+        root->root_path->buf,
+        cmd->triggername->buf, strerror(errno));
+    return;
+  }
 
   // Assumption: that only one thread will be executing on a given
   // cmd instance so that mutation of cmd->envht is safe.
@@ -227,6 +243,12 @@ static void spawn_command(w_root_t *root,
     w_envp_set_cstring(cmd->envht, "WATCHMAN_CLOCK", clockbuf);
   } else {
     w_envp_unset(cmd->envht, "WATCHMAN_CLOCK");
+  }
+
+  if (cmd->query->relative_root) {
+    w_envp_set(cmd->envht, "WATCHMAN_RELATIVE_ROOT", cmd->query->relative_root);
+  } else {
+    w_envp_unset(cmd->envht, "WATCHMAN_RELATIVE_ROOT");
   }
 
   // Compute args
@@ -272,8 +294,10 @@ static void spawn_command(w_root_t *root,
   envp = w_envp_make_from_ht(cmd->envht, &env_size);
 
   posix_spawnattr_init(&attr);
+#ifndef _WIN32
   sigemptyset(&mask);
   posix_spawnattr_setsigmask(&attr, &mask);
+#endif
   posix_spawnattr_setflags(&attr,
       POSIX_SPAWN_SETSIGMASK|
 #ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
@@ -284,7 +308,13 @@ static void spawn_command(w_root_t *root,
 
   posix_spawn_file_actions_init(&actions);
 
-  posix_spawn_file_actions_adddup2(&actions, stdin_fd, STDIN_FILENO);
+#ifndef _WIN32
+  posix_spawn_file_actions_adddup2(&actions, w_stm_fileno(stdin_file),
+      STDIN_FILENO);
+#else
+  posix_spawn_file_actions_adddup2_handle_np(&actions,
+      w_stm_handle(stdin_file), STDIN_FILENO);
+#endif
   if (cmd->stdout_name) {
     posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO,
         cmd->stdout_name, cmd->stdout_flags, 0666);
@@ -299,13 +329,47 @@ static void spawn_command(w_root_t *root,
     posix_spawn_file_actions_adddup2(&actions, STDERR_FILENO, STDERR_FILENO);
   }
 
-  pthread_mutex_lock(&spawn_lock);
-  ignore_result(chdir(root->root_path->buf));
+  // Figure out the appropriate cwd
+  {
+    const char *cwd = NULL;
+    working_dir = NULL;
 
-  json_unpack(cmd->definition, "{s:s}", "chdir", &cwd);
-  if (cwd) {
-    ignore_result(chdir(cwd));
+    if (cmd->query->relative_root) {
+      working_dir = cmd->query->relative_root;
+    } else {
+      working_dir = root->root_path;
+    }
+    w_string_addref(working_dir);
+
+    json_unpack(cmd->definition, "{s:s}", "chdir", &cwd);
+    if (cwd) {
+      w_string_t *cwd_str = w_string_new(cwd);
+
+      if (w_is_path_absolute(cwd)) {
+        w_string_delref(working_dir);
+        working_dir = cwd_str;
+      } else {
+        w_string_t *joined;
+
+        joined = w_string_path_cat(working_dir, cwd_str);
+        w_string_delref(cwd_str);
+        w_string_delref(working_dir);
+
+        working_dir = joined;
+      }
+    }
+
+    w_log(W_LOG_DBG, "using %.*s for working dir\n", working_dir->len, working_dir->buf);
   }
+
+  pthread_mutex_lock(&spawn_lock);
+#ifndef _WIN32
+  ignore_result(chdir(working_dir->buf));
+#else
+  posix_spawnattr_setcwd_np(&attr, working_dir->buf);
+#endif
+  w_string_delref(working_dir);
+  working_dir = NULL;
 
   ret = posix_spawnp(&cmd->current_proc, argv[0], &actions, &attr, argv, envp);
   if (ret == 0) {
@@ -318,7 +382,9 @@ static void spawn_command(w_root_t *root,
     // effectively disabled for the rest of the watch lifetime
     cmd->current_proc = 0;
   }
+#ifndef _WIN32
   ignore_result(chdir("/"));
+#endif
   pthread_mutex_unlock(&spawn_lock);
 
   // If failed, we want to make sure we log enough info to figure out why
@@ -343,8 +409,8 @@ static void spawn_command(w_root_t *root,
   posix_spawnattr_destroy(&attr);
   posix_spawn_file_actions_destroy(&actions);
 
-  if (stdin_fd != -1) {
-    close(stdin_fd);
+  if (stdin_file) {
+    w_stm_close(stdin_file);
   }
 }
 
@@ -369,6 +435,10 @@ static bool trigger_generator(
     if (!ctx->since.is_timestamp &&
         f->otime.ticks <= ctx->since.clock.ticks) {
       break;
+    }
+
+    if (!w_query_file_matches_relative_root(ctx, f)) {
+      continue;
     }
 
     if (!w_query_process_file(query, ctx, f)) {

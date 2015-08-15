@@ -1,4 +1,4 @@
-AC_INIT([watchman], [3.0.0], [], [watchman])
+AC_INIT([watchman], [3.8.0], [], [watchman])
 AC_CANONICAL_TARGET
 AM_INIT_AUTOMAKE([dist-bzip2 subdir-objects])
 m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES(yes)])
@@ -65,9 +65,9 @@ AC_ARG_ENABLE(statedir, [
 ])
 AC_SUBST(WATCHMAN_STATE_DIR)
 
-want_python=no
+want_python=yes
 AC_ARG_WITH(python, [
-  --with-python        Enable python bindings
+  --without-python        Disable python bindings
 ],[
    want_python="$withval"
 ])

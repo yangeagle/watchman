@@ -1,12 +1,13 @@
 /* Copyright 2012-present Facebook, Inc.
  * Licensed under the Apache License, Version 2.0 */
-
 #include "watchman.h"
+#ifndef _WIN32
 #include <poll.h>
+#endif
 
 static int show_help = 0;
 static int show_version = 0;
-static enum w_pdu_type server_pdu = is_json_compact;
+static enum w_pdu_type server_pdu = is_bser;
 static enum w_pdu_type output_pdu = is_json_pretty;
 static char *server_encoding = NULL;
 static char *output_encoding = NULL;
@@ -24,14 +25,16 @@ static int foreground = 0;
 static int no_pretty = 0;
 static int no_spawn = 0;
 static int no_local = 0;
+#ifndef _WIN32
 static struct sockaddr_un un;
+#endif
 static int json_input_arg = 0;
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
 
-#if defined(USE_GIMLI) || defined(__APPLE__)
+#if defined(USE_GIMLI) || defined(__APPLE__) || defined(_WIN32)
 # define SPAWN_VIA_LAUNCHER 1
 #endif
 
@@ -43,18 +46,35 @@ static void run_service(void)
   // redirect std{in,out,err}
   fd = open("/dev/null", O_RDONLY);
   if (fd != -1) {
-    dup2(fd, STDIN_FILENO);
+    ignore_result(dup2(fd, STDIN_FILENO));
     close(fd);
   }
   fd = open(log_name, O_WRONLY|O_APPEND|O_CREAT, 0600);
   if (fd != -1) {
-    dup2(fd, STDOUT_FILENO);
-    dup2(fd, STDERR_FILENO);
+    ignore_result(dup2(fd, STDOUT_FILENO));
+    ignore_result(dup2(fd, STDERR_FILENO));
     close(fd);
   }
 
+#ifndef _WIN32
   /* we are the child, let's set things up */
   ignore_result(chdir("/"));
+#endif
+
+  w_set_thread_name("listener");
+  {
+    char hostname[256];
+    gethostname(hostname, sizeof(hostname));
+    hostname[sizeof(hostname) - 1] = '\0';
+    w_log(W_LOG_ERR, "Watchman %s %s starting up on %s\n",
+        PACKAGE_VERSION,
+#ifdef WATCHMAN_BUILD_INFO
+        WATCHMAN_BUILD_INFO,
+#else
+        "<no build info set>",
+#endif
+        hostname);
+  }
 
   watchman_watcher_init();
   res = w_start_listener(sock_name);
@@ -66,7 +86,7 @@ static void run_service(void)
   exit(1);
 }
 
-#ifndef USE_GIMLI
+#if !defined(USE_GIMLI) && !defined(_WIN32)
 static void daemonize(void)
 {
   // the double-fork-and-setsid trick establishes a
@@ -110,6 +130,39 @@ static void append_argv(char **argv, char *item)
   argv[i] = item;
   argv[i+1] = NULL;
 }
+
+#ifdef _WIN32
+static void spawn_win32(void) {
+  char module_name[WATCHMAN_NAME_MAX];
+  GetModuleFileName(NULL, module_name, sizeof(module_name));
+  char *argv[MAX_DAEMON_ARGS] = {
+    module_name,
+    "--foreground",
+    NULL
+  };
+  posix_spawn_file_actions_t actions;
+  posix_spawnattr_t attr;
+  pid_t pid;
+  int i;
+
+  for (i = 0; daemon_argv[i]; i++) {
+    append_argv(argv, daemon_argv[i]);
+  }
+
+  posix_spawnattr_init(&attr);
+  posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+  posix_spawn_file_actions_init(&actions);
+  posix_spawn_file_actions_addopen(&actions,
+      STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+  posix_spawn_file_actions_addopen(&actions,
+      STDOUT_FILENO, log_name, O_WRONLY|O_CREAT|O_APPEND, 0600);
+  posix_spawn_file_actions_adddup2(&actions,
+      STDOUT_FILENO, STDERR_FILENO);
+  posix_spawnp(&pid, argv[0], &actions, &attr, argv, environ);
+  posix_spawnattr_destroy(&attr);
+  posix_spawn_file_actions_destroy(&actions);
+}
+#endif
 
 #ifdef USE_GIMLI
 static void spawn_via_gimli(void)
@@ -228,6 +281,7 @@ static void spawn_via_launchd(void)
 "        <string>%s</string>\n"
 "        <string>--foreground</string>\n"
 "        <string>--logfile=%s</string>\n"
+"        <string>--log-level=%d</string>\n"
 "        <string>--sockname=%s</string>\n"
 "        <string>--statefile=%s</string>\n"
 "    </array>\n"
@@ -246,10 +300,19 @@ static void spawn_via_launchd(void)
 "    </dict>\n"
 "    <key>RunAtLoad</key>\n"
 "    <false/>\n"
+"    <key>EnvironmentVariables</key>\n"
+"    <dict>\n"
+"        <key>PATH</key>\n"
+"        <string><![CDATA[%s]]></string>\n"
+"    </dict>\n"
 "</dict>\n"
 "</plist>\n",
-    watchman_path, log_name, sock_name, watchman_state_file, sock_name);
+    watchman_path, log_name, log_level, sock_name,
+    watchman_state_file, sock_name,
+    getenv("PATH"));
   fclose(fp);
+  // Don't rely on umask, ensure we have the correct perms
+  chmod(plist_path, 0644);
 
   append_argv(argv, plist_path);
 
@@ -333,14 +396,17 @@ static void compute_file_name(char **strp,
 #ifdef WATCHMAN_STATE_DIR
     /* avoid redundant naming if they picked something like
      * "/var/watchman" */
-    ignore_result(asprintf(&str, "%s/%s%s%s",
+    ignore_result(asprintf(&str, "%s%c%s%s%s",
           WATCHMAN_STATE_DIR,
+          WATCHMAN_DIR_SEP,
           user,
           suffix[0] ? "." : "",
           suffix));
 #else
-    ignore_result(asprintf(&str, "%s/.watchman.%s%s%s",
+    ignore_result(asprintf(&str, "%s%c%cwatchman.%s%s%s",
           watchman_tmp_dir,
+          WATCHMAN_DIR_SEP,
+          WATCHMAN_DIR_DOT,
           user,
           suffix[0] ? "." : "",
           suffix));
@@ -352,11 +418,12 @@ static void compute_file_name(char **strp,
     abort();
   }
 
+#ifndef _WIN32
   if (str[0] != '/') {
     w_log(W_LOG_ERR, "invalid %s: %s", what, str);
     abort();
   }
-
+#endif
 
   *strp = str;
 }
@@ -364,21 +431,34 @@ static void compute_file_name(char **strp,
 static void setup_sock_name(void)
 {
   const char *user = get_env_with_fallback("USER", "LOGNAME", NULL);
+#ifdef _WIN32
+  char user_buf[256];
+#endif
 
   watchman_tmp_dir = get_env_with_fallback("TMPDIR", "TMP", "/tmp");
 
   if (!user) {
+#ifdef _WIN32
+    DWORD size = sizeof(user_buf);
+    if (GetUserName(user_buf, &size)) {
+      user_buf[size] = 0;
+      user = user_buf;
+    } else {
+      w_log(W_LOG_FATAL, "GetUserName failed: %s. I don't know who you are\n",
+          win32_strerror(GetLastError()));
+    }
+#else
     uid_t uid = getuid();
     struct passwd *pw;
 
     pw = getpwuid(uid);
     if (!pw) {
-      w_log(W_LOG_ERR, "getpwuid(%d) failed: %s. I don't know who you are\n",
+      w_log(W_LOG_FATAL, "getpwuid(%d) failed: %s. I don't know who you are\n",
           uid, strerror(errno));
-      abort();
     }
 
     user = pw->pw_name;
+#endif
 
     if (!user) {
       w_log(W_LOG_ERR, "watchman requires that you set $USER in your env\n");
@@ -386,13 +466,20 @@ static void setup_sock_name(void)
     }
   }
 
+#ifdef _WIN32
+  if (!sock_name) {
+    asprintf(&sock_name, "\\\\.\\pipe\\watchman-%s", user);
+  }
+#else
   compute_file_name(&sock_name, user, "", "sockname");
+#endif
   compute_file_name(&watchman_state_file, user, "state", "statefile");
   compute_file_name(&log_name, user, "log", "logname");
 #ifdef USE_GIMLI
   compute_file_name(&pid_file, user, "pid", "pidfile");
 #endif
 
+#ifndef _WIN32
   un.sun_family = PF_LOCAL;
   strcpy(un.sun_path, sock_name);
 
@@ -401,6 +488,7 @@ static void setup_sock_name(void)
         sock_name);
     abort();
   }
+#endif
 }
 
 static bool should_start(int err)
@@ -416,67 +504,45 @@ static bool should_start(int err)
 
 static bool try_command(json_t *cmd, int timeout)
 {
-  int fd;
-  int res;
-  int tries;
-  int bufsize;
+  w_stm_t client = NULL;
   w_jbuffer_t buffer;
+  int err;
 
-  fd = socket(PF_LOCAL, SOCK_STREAM, 0);
-  if (fd == -1) {
-    perror("socket");
-    return false;
-  }
-
-  tries = 0;
-  do {
-    res = connect(fd, (struct sockaddr*)&un, sizeof(un));
-    if (res == 0) {
-      break;
-    }
-
-    if (timeout && tries < timeout && should_start(errno)) {
-      // Wait for socket to come up
-      sleep(1);
-      continue;
-    }
-
-  } while (++tries < timeout);
-
-  if (res) {
-    close(fd);
+  client = w_stm_connect(sock_name, timeout * 1000);
+  if (client == NULL) {
     return false;
   }
 
   if (!cmd) {
-    close(fd);
+    w_stm_close(client);
     return true;
   }
-
-  bufsize = WATCHMAN_IO_BUF_SIZE;
-  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
 
   w_json_buffer_init(&buffer);
 
   // Send command
-  if (!w_ser_write_pdu(server_pdu, &buffer, fd, cmd)) {
+  if (!w_ser_write_pdu(server_pdu, &buffer, client, cmd)) {
+    err = errno;
     w_log(W_LOG_ERR, "error sending PDU to server\n");
     w_json_buffer_free(&buffer);
-    close(fd);
+    w_stm_close(client);
+    errno = err;
     return false;
   }
 
   w_json_buffer_reset(&buffer);
 
   do {
-    if (!w_json_buffer_passthru(&buffer, output_pdu, fd)) {
+    if (!w_json_buffer_passthru(&buffer, output_pdu, client)) {
+      err = errno;
       w_json_buffer_free(&buffer);
-      close(fd);
+      w_stm_close(client);
+      errno = err;
       return false;
     }
   } while (persistent);
   w_json_buffer_free(&buffer);
-  close(fd);
+  w_stm_close(client);
 
   return true;
 }
@@ -548,10 +614,27 @@ static json_t *build_command(int argc, char **argv)
   // Read blob from stdin
   if (json_input_arg) {
     json_error_t err;
+    w_jbuffer_t buf;
 
-    cmd = json_loadf(stdin, 0, &err);
+    memset(&err, 0, sizeof(err));
+    w_json_buffer_init(&buf);
+    cmd = w_json_buffer_next(&buf, w_stm_stdin(), &err);
+
+    if (buf.pdu_type == is_bser) {
+      // If they used bser for the input, select bser for output
+      // unless they explicitly requested something else
+      if (!server_encoding) {
+        server_pdu = is_bser;
+      }
+      if (!output_encoding) {
+        output_pdu = is_bser;
+      }
+    }
+
+    w_json_buffer_free(&buf);
+
     if (cmd == NULL) {
-      fprintf(stderr, "failed to parse JSON from stdin: %s\n",
+      fprintf(stderr, "failed to parse command from stdin: %s\n",
           err.text);
       exit(1);
     }
@@ -590,6 +673,7 @@ int main(int argc, char **argv)
     return 0;
   }
 
+  w_set_thread_name("cli");
   cmd = build_command(argc, argv);
   preprocess_command(cmd, output_pdu);
 
@@ -604,6 +688,8 @@ int main(int argc, char **argv)
       spawn_via_gimli();
 #elif defined(__APPLE__)
       spawn_via_launchd();
+#elif defined(_WIN32)
+      spawn_win32();
 #else
       daemonize();
 #endif
@@ -618,7 +704,8 @@ int main(int argc, char **argv)
   }
 
   if (!no_spawn) {
-    w_log(W_LOG_ERR, "unable to talk to your watchman on %s!\n", sock_name);
+    w_log(W_LOG_ERR, "unable to talk to your watchman on %s! (%s)\n",
+        sock_name, strerror(errno));
   }
   return 1;
 }

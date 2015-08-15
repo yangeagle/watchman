@@ -19,33 +19,51 @@ If we ask you to fill out a CLA we'll direct you to [our online CLA
 page](https://code.facebook.com/cla) where you can complete it
 easily.  We use the same form as the Apache CLA so that friction is minimal.
 
-### Tools
+### Getting Started
 
-We use a tool called `arc` to run tests and perform lint checks.  `arc` is part
-of [Phabricator](http://www.phabricator.org) and can be installed by following
-these steps:
+You need to be able to build watchman from source and run its test suite.
+You will need:
 
-```bash
-$ mkdir /somewhere
-$ cd /somewhere
-$ git clone git://github.com/facebook/libphutil.git
-$ git clone git://github.com/facebook/arcanist.git
+* python
+* automake
+* autoconf
+* libpcre
+* nodejs (for the docs and for fb-watchman)
+
+```
+$ git clone https://github.com/facebook/watchman.git
+$ cd watchman
+$ ./autogen.sh
+$ ./configure
+$ make
 ```
 
-Add `arc` to your path:
+After making a change, run the integration tests to make sure that things
+are still working well before you submit your pull request:
 
-```bash
-$ export PATH="$PATH:/somewhere/arcanist/bin/"
+```
+$ make integration
 ```
 
-With `arc` in your path, re-running configure will detect it and adjust the
-makefile so that `arc lint` will be run as part of `make`, but you can run it
-yourself outside of make.
+We'll probably ask you to augment the test suite to cover the functionality
+that you're adding or changing.
 
-You can run the unit tests using:
+Please keep in mind that our versioning philosophy in Watchman is to provide
+an *append only* API.  If you're changing functionality, we'll ask you to do
+so in such a way that it won't break older clients of Watchman.
 
-    $ make integration
+### Don't forget the docs
 
-If you'd like to contribute a patch to watchman, we'll ask you to make sure
-that `arc unit` still passes successfully and we'd ideally like you to augment
-the test suite to cover the functionality that you're adding or changing.
+If you're changing or adding new functionality, we'll ask you to also update
+the documentation.   You will need `nodejs` to preview the documentation:
+
+```
+$ cd website
+$ npm install
+$ npm start
+```
+
+This will print out a URL that you can open in your browser to preview your
+documentation changes.
+
+The source for the documentation is in the `docs` dir in markdown format.

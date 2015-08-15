@@ -4,8 +4,8 @@
 
 class SuffixGeneratorTestCase extends WatchmanTestCase {
   function testGeneratorExpr() {
-    $dir = PhutilDirectoryFixture::newEmptyFixture();
-    $root = realpath($dir->getPath());
+    $dir = new WatchmanDirectoryFixture();
+    $root = $dir->getPath();
 
     touch("$root/foo.c");
     mkdir("$root/subdir");
@@ -25,9 +25,15 @@ class SuffixGeneratorTestCase extends WatchmanTestCase {
       'fields' => array('name'),
       'suffix' => array('c','txt')
     ));
-    sort($res['files']);
-    $this->assertEqual(array('foo.c', 'subdir/bar.txt'), $res['files']);
+    $this->assertEqualFileList(array('foo.c', 'subdir/bar.txt'), $res['files']);
 
+    $res = $this->watchmanCommand('query', $root, array(
+      'expression' => array('true'),
+      'fields' => array('name'),
+      'suffix' => array('c', 'txt'),
+      'relative_root' => 'subdir',
+    ));
+    $this->assertEqualFileList(array('bar.txt'), $res['files']);
 
     $res = $this->watchmanCommand('query', $root, array(
       'expression' => array('true'),
@@ -44,4 +50,3 @@ class SuffixGeneratorTestCase extends WatchmanTestCase {
 }
 
 // vim:ts=2:sw=2:et:
-

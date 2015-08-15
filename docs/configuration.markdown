@@ -43,13 +43,17 @@ This table shows the scoping and availability of the various options:
 Option | Scope | Since version
 -------|-------|--------------
 `settle` | local |
-`root_restrict_files` | global
+`root_restrict_files` | global | deprecated in 3.1
+`root_files` | global | 3.1
+`enforce_root_files` | global | 3.1
 `illegal_fstypes` | global | 2.9.8
 `illegal_fstypes_advice` | global | 2.9.8
 `ignore_vcs` | local | 2.9.3
 `ignore_dirs` | local | 2.9.3
 `gc_age_seconds` | local | 2.9.4
 `gc_interval_seconds` | local | 2.9.4
+`fsevents_latency` | fallback | 3.2
+`idle_reap_age_seconds` local | 3.7
 
 ### Configuration Options
 
@@ -59,7 +63,58 @@ Specifies the settle period in *milliseconds*.  This controls how long the
 filesystem should be idle before dispatching triggers.  The default value is 20
 milliseconds.
 
+#### root_files
+
+Available starting in version 3.1
+
+Specifies a list of files that, if present in a directory, identify that
+directory as the root of a project.
+
+If left unspecified, to aid in transitioning between versions, watchman will
+use the value of the now deprecated
+[root_restrict_files](#root_restrict_files) configuration setting.
+
+If neither `root_files` nor `root_restrict_files` is specified in the
+configuration, watchman will use a default value consisting of:
+
+* `.git`
+* `.hg`
+* `.svn`
+* `.watchmanconfig`
+
+Watchman will add `.watchmanconfig` to whatever value is specified for
+this configuration value if it is not present.
+
+This example causes only `.watchmanconfig` to be considered as a project
+root file:
+
+```json
+{
+  "root_files": [".watchmanconfig"]
+}
+```
+
+See the [watch-project](cmd/watch-project.html) command for more information.
+
+#### enforce_root_files
+
+Available starting in version 3.1
+
+This is a boolean option that defaults to `false`.  If it is set to `true`
+then the [watch](cmd/watch.html) command will only succeed if the requested
+directory contains one of the files listed by the [root_files](#root_files)
+configuration option, and the [watch-project](cmd/watch-project.html) command
+will only succeed if a valid project root is found.
+
+If left unspecified, to aid in transitioning between versions, watchman will
+check to see if the now deprecated [root_restrict_files](#root_restrict_files)
+configuration setting is present.  If it is found then the effective value of
+`enforce_root_files` is set to `true`.
+
 #### root_restrict_files
+
+Deprecated starting in version 3.1; use [root_files](#root_files) and
+[enforce_root_files](#enforce_root_files) to effect the same behavior.
 
 Specifies a list of files, at least one of which should be present in a
 directory for watchman to add it as a root. By default there are no
@@ -150,3 +205,28 @@ elsewhere in this document for more information.  The default for this is
 How often to check for, and prune out, deleted nodes per the `gc_age_seconds`
 option description above.  The default for this is `86400` (24 hours).  Set
 this to `0` to disable the periodic pruning operation.
+
+#### fsevents_latency
+
+Controls the latency parameter that is passed to `FSEventStreamCreate` on OS X.
+The value is measured in seconds.  The fixed value of this parameter prior to
+version 3.2 of watchman was `0.0001` seconds.  Starting in version 3.2 of
+watchman, the default is now `0.01` seconds and can be controlled on a
+per-root basis.
+
+If you observe problems with `kFSEventStreamEventFlagUserDropped` increasing
+the latency parameter will allow the system to batch more change notifications
+together and operate more efficiently.
+
+#### idle_reap_age_seconds
+
+*Since 3.7*
+
+How many seconds a watch can remain idle before becoming a candidate for
+reaping, measured in seconds.  The default for this is `432000` (5 days).  Set
+this to `0` to prevent reaping.
+
+A watch is considered to be idle when it has had no commands that operate on it
+for `idle_reap_age_seconds`.   If an idle watch has no triggers and no
+subscriptions then it will be cancelled, releasing the associated operating
+system resources, and removed from the state file.

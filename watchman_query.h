@@ -41,21 +41,26 @@ typedef void (*w_query_expr_dispose_func)(
     void *data
 );
 struct w_query_expr {
-  int refcnt;
+  long refcnt;
   w_query_expr_eval_func    evaluate;
   w_query_expr_dispose_func dispose;
   void *data;
 };
 
 struct w_query {
-  int refcnt;
+  long refcnt;
 
   bool case_sensitive;
+
+  /* optional full path to relative root, without and with trailing slash */
+  w_string_t *relative_root;
+  w_string_t *relative_root_slash;
+
   struct w_query_path *paths;
-  uint32_t npaths;
+  size_t npaths;
 
   w_string_t **suffixes;
-  uint32_t nsuffixes;
+  size_t nsuffixes;
 
   uint32_t sync_timeout;
 
@@ -94,6 +99,10 @@ w_query_expr *w_query_expr_new(
     w_query_expr_dispose_func dispose,
     void *data
 );
+
+bool w_query_file_matches_relative_root(
+    struct w_query_ctx *ctx,
+    struct watchman_file *file);
 
 // Allows a generator to process a file node
 // through the query engine
@@ -162,15 +171,34 @@ json_t *w_query_results_to_json(
 
 void w_query_init_all(void);
 
+enum w_query_icmp_op {
+  W_QUERY_ICMP_EQ,
+  W_QUERY_ICMP_NE,
+  W_QUERY_ICMP_GT,
+  W_QUERY_ICMP_GE,
+  W_QUERY_ICMP_LT,
+  W_QUERY_ICMP_LE,
+};
+struct w_query_int_compare {
+  enum w_query_icmp_op op;
+  json_int_t operand;
+};
+bool parse_int_compare(json_t *term, struct w_query_int_compare *comp,
+    char **errmsg);
+bool eval_int_compare(json_int_t ival, struct w_query_int_compare *comp);
+
 bool parse_field_list(json_t *field_list,
     struct w_query_field_list *selected,
     char **errmsg);
 
-#define W_TERM_PARSER(name, func) \
-  static __attribute__((constructor)) \
-  void w_gen_symbol(w_term_register_)(void) { \
+#define W_TERM_PARSER1(symbol, name, func) \
+  static w_ctor_fn_type(symbol) {                   \
     w_query_register_expression_parser(name, func); \
-  }
+  }                                                 \
+  w_ctor_fn_reg(symbol)
+
+#define W_TERM_PARSER(name, func) \
+  W_TERM_PARSER1(w_gen_symbol(w_term_register_), name, func)
 
 #ifdef __cplusplus
 }

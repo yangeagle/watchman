@@ -7,9 +7,75 @@ class subscribeTestCase extends WatchmanTestCase {
     return true;
   }
 
-  function testSubscribe() {
-    $dir = PhutilDirectoryFixture::newEmptyFixture();
+  function testImmediateSubscribe() {
+    $dir = new WatchmanDirectoryFixture();
     $root = realpath($dir->getPath());
+    mkdir("$root/.hg");
+
+    $this->watch($root);
+    $this->assertFileList($root, array('.hg'));
+    try {
+      $sub = $this->watchmanCommand('subscribe', $root, 'nodefer', array(
+        'fields' => array('name', 'exists'),
+        'defer_vcs' => false,
+      ));
+
+      $this->waitForSub('nodefer', function ($data) {
+        return true;
+      });
+      list($sub) = $this->getSubData('nodefer');
+
+      $this->assertEqual(true, $sub['is_fresh_instance']);
+      $files = $sub['files'];
+      $this->assertEqual(
+        array(
+          array('name' => '.hg', 'exists' => true)
+        ), $files);
+
+      touch("$root/.hg/wlock");
+      $this->waitForSub('nodefer', function ($data) {
+        return true;
+      });
+      $sub = $this->tail($this->getSubData('nodefer'));
+      $wlock = null;
+      foreach ($sub['files'] as $ent) {
+        if ($ent['name'] == '.hg/wlock') {
+          $wlock = $ent;
+        }
+      }
+      $this->assertEqual(array('name' => w_normalize_filename('.hg/wlock'),
+          'exists' => true), $ent);
+
+      unlink("$root/.hg/wlock");
+
+      $this->waitForSub('nodefer', function ($data) {
+        return true;
+      });
+      $sub = $this->tail($this->getSubData('nodefer'));
+
+      $wlock = null;
+      foreach ($sub['files'] as $ent) {
+        if ($ent['name'] == '.hg/wlock') {
+          $wlock = $ent;
+        }
+      }
+      $this->assertEqual(array('name' => w_normalize_filename('.hg/wlock'),
+            'exists' => false), $ent);
+
+      $this->watchmanCommand('unsubscribe', $root, 'nodefer');
+    } catch (Exception $e) {
+      $this->watchmanCommand('unsubscribe', $root, 'nodefer');
+      throw $e;
+    }
+  }
+
+  function tail(array $array) {
+    return end($array);
+  }
+
+  function testSubscribe() {
+    $dir = new WatchmanDirectoryFixture();
+    $root = $dir->getPath();
     mkdir("$root/a");
     touch("$root/a/lemon");
     touch("$root/b");
@@ -27,6 +93,12 @@ class subscribeTestCase extends WatchmanTestCase {
         'fields' => array('name'),
       ));
 
+      $relative_sub = $this->watchmanCommand('subscribe', $root, 'relative',
+        array(
+          'fields' => array('name'),
+          'relative_root' => 'a',
+        ));
+
       $this->waitForSub('myname', function ($data) {
         return true;
       });
@@ -35,23 +107,34 @@ class subscribeTestCase extends WatchmanTestCase {
       $this->assertEqual(true, $sub['is_fresh_instance']);
       $files = $sub['files'];
       sort($files);
-      $this->assertEqual(array('a', 'a/lemon', 'b'), $files);
+      $this->assertEqualFileList(array('a', 'a/lemon', 'b'), $files);
 
-      // delete a file and see that subscribe tells us about it
-      unlink("$root/a/lemon");
-      $this->waitForSub('myname', function ($data) {
+      $this->waitForSub('relative', function ($data) {
         return true;
       });
-      list($sub) = $this->getSubData('myname');
+      list($sub) = $this->getSubData('relative');
+
+      $this->assertEqual(true, $sub['is_fresh_instance']);
+      $files = $sub['files'];
+      $this->assertEqual(array('lemon'), $files);
+
+      // delete a file and see that subscribe tells us about it.
+      unlink("$root/a/lemon");
+      $this->waitForSub('myname', function ($data) {
+        return w_find_subdata_containing_file($data, 'a/lemon') !== null;
+      });
+      $sub = w_find_subdata_containing_file(
+          $this->getSubData('myname'), 'a/lemon');
+      $this->assertTrue(is_array($sub), 'missing `myname` subscription data');
+      $this->assertEqual(false, $sub['is_fresh_instance']);
+
+      $this->waitForSub('relative', function ($data) {
+        return true;
+      });
+      $sub = $this->tail($this->getSubData('relative'));
 
       $this->assertEqual(false, $sub['is_fresh_instance']);
-      $expect = array('a/lemon');
-      if (PHP_OS == 'SunOS') {
-        // This makes me sad, but Solaris reports the parent dir
-        // as changed, too
-        array_unshift($expect, 'a');
-      }
-      $this->assertEqual($expect, $sub['files']);
+      $this->assertEqual(array('lemon'), $sub['files']);
 
       // trigger a recrawl, make sure the subscription isn't lost
       $this->watchmanCommand('debug-recrawl', $root);
@@ -83,8 +166,10 @@ class subscribeTestCase extends WatchmanTestCase {
       $this->assertRegex('/Recrawled this watch/', $warn);
 
       $this->watchmanCommand('unsubscribe', $root, 'myname');
+      $this->watchmanCommand('unsubscribe', $root, 'relative');
     } catch (Exception $e) {
       $this->watchmanCommand('unsubscribe', $root, 'myname');
+      $this->watchmanCommand('unsubscribe', $root, 'relative');
       throw $e;
     }
   }

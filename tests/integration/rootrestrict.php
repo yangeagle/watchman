@@ -24,8 +24,8 @@ class rootRestrictTestCase extends WatchmanTestCase {
     );
 
     foreach ($passes as $p) {
-      $dir = PhutilDirectoryFixture::newEmptyFixture();
-      $root = realpath($dir->getPath());
+      $dir = new WatchmanDirectoryFixture();
+      $root = $dir->getPath();
 
       if ($p[0] === "directory") {
         mkdir("$root/$p[1]");
@@ -43,8 +43,8 @@ class rootRestrictTestCase extends WatchmanTestCase {
     }
 
     foreach ($fails as $f) {
-      $dir = PhutilDirectoryFixture::newEmptyFixture();
-      $root = realpath($dir->getPath());
+      $dir = new WatchmanDirectoryFixture();
+      $root = $dir->getPath();
 
       if ($f) {
         if ($f[0] === "directory") {
@@ -56,8 +56,8 @@ class rootRestrictTestCase extends WatchmanTestCase {
 
       $res = $this->watch($root, false);
       $this->assertEqual("unable to resolve root $root: none of the files " .
-                         "listed in global config root_restrict_files are " .
-                         "present",
+                         "listed in global config root_files are " .
+                         "present and enforce_root_files is set to true",
                          $res['error']);
     }
   }

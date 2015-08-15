@@ -2,39 +2,36 @@
 /* Copyright 2012-present Facebook, Inc.
  * Licensed under the Apache License, Version 2.0 */
 
-class WatchmanTapEngine extends ArcanistBaseUnitTestEngine {
+class WatchmanTapEngine {
   private $projectRoot;
 
+  public function setProjectRoot($root) {
+    $this->projectRoot = $root;
+  }
+
   protected function getProjectRoot() {
-    if (!$this->projectRoot) {
-      $this->projectRoot = $this->getWorkingCopy()->getProjectRoot();
-    }
     return $this->projectRoot;
   }
 
-  protected function make($target) {
-    return execx("cd %s && \${MAKE:-make} %s",
-      $this->getProjectRoot(), $target);
+  public function run($tests) {
+    return $this->runUnitTests($tests);
   }
 
-  public function run() {
-    return $this->runUnitTests();
+  public function getEnableCoverage() {
+    return false;
   }
 
-  public function runUnitTests() {
-    // Build any unit tests
-    $this->make('build-tests');
-
+  public function runUnitTests($tests) {
     // Now find all the test programs
     $root = $this->getProjectRoot();
     $test_dir = $root . "/tests/";
     $futures = array();
 
-    if ($this->getRunAllTests()) {
+    if (!$tests) {
       $paths = glob($test_dir . "*.t");
     } else {
       $paths = array();
-      foreach ($this->getPaths() as $path) {
+      foreach ($tests as $path) {
         $tpath = preg_replace('/\.c$/', '.t', $path);
         if (preg_match("/\.c$/", $path) && file_exists($tpath)) {
           $paths[] = realpath($tpath);

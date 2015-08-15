@@ -4,15 +4,13 @@
 
 class findTestCase extends WatchmanTestCase {
   function testFind() {
-    $dir = PhutilDirectoryFixture::newEmptyFixture();
-    $root = realpath($dir->getPath());
+    $dir = new WatchmanDirectoryFixture();
+    $root = $dir->getPath();
 
     touch("$root/foo.c");
     touch("$root/bar.txt");
 
     $out = $this->watch($root);
-    $this->assertEqual($root, $out['watch']);
-
     $this->assertFileList($root, array('bar.txt', 'foo.c'));
 
     // Make sure we correctly observe deletions
@@ -39,8 +37,9 @@ class findTestCase extends WatchmanTestCase {
       'foo.c',
     ));
 
-    $this->assertEqual(true,
-      rename("$root/adir", "$root/bdir"));
+    $this->assertEqual(true, rename(
+          $root . DIRECTORY_SEPARATOR . 'adir',
+          $root . DIRECTORY_SEPARATOR . 'bdir'));
 
     $this->assertFileList($root, array(
       'bdir',
@@ -50,26 +49,19 @@ class findTestCase extends WatchmanTestCase {
     ));
 
     $list = $this->watchmanCommand('watch-list');
-    $this->assertEqual(
-      true,
-      in_array($root, $list['roots'])
-    );
+    $this->assertTrue(w_is_file_in_file_list($root, $list['roots']));
 
     $del = $this->watchmanCommand('watch-del', $root);
 
     $watches = $this->waitForWatchman(
       array('watch-list'),
       function ($list) use ($root) {
-        return !in_array($root, $list['roots']);
+        return !w_is_file_in_file_list($root, $list['roots']);
       }
     );
-    $this->assertEqual(
-      false,
-      in_array($root, $watches['roots']),
+    $this->assertFalse(
+      w_is_file_in_file_list($root, $watches['roots']),
       "watch deleted"
     );
   }
 }
-
-
-

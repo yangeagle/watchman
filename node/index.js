@@ -1,12 +1,11 @@
 /* Copyright 2014-present Facebook, Inc.
  * Licensed under the Apache License, Version 2.0 */
 
-var nextback = require('nextback');
 var net = require('net');
 var EE = require('events').EventEmitter;
 var util = require('util');
-var JSONStream = require('json-stream');
 var childProcess = require('child_process');
+var bser = require('./bser');
 
 // We'll emit the responses to these when they get sent down to us
 var unilateralTags = ['subscription', 'log'];
@@ -44,7 +43,7 @@ Client.prototype.sendNextCommand = function() {
     return;
   }
 
-  this.socket.write(JSON.stringify(this.currentCommand.cmd) + '\n');
+  this.socket.write(bser.dumpToBuffer(this.currentCommand.cmd));
 }
 
 Client.prototype.cancelCommands = function(why) {
@@ -70,10 +69,10 @@ Client.prototype.connect = function() {
   var self = this;
 
   function makeSock(sockname) {
-    // jstream will decode the JSON line protocol for us
-    self.jstream = new JSONStream();
+    // bunser will decode the watchman BSER protocol for us
+    self.bunser = new bser.BunserBuf();
     // For each decoded line:
-    self.jstream.on('data', function(obj) {
+    self.bunser.on('value', function(obj) {
       // Figure out if this is a unliteral response or if it is the
       // response portion of a request-response sequence.  At the time
       // of writing, there are only two possible unilateral responses.
@@ -102,6 +101,9 @@ Client.prototype.connect = function() {
       // See if we can dispatch the next queued command, if any
       self.sendNextCommand();
     });
+    self.bunser.on('error', function(err) {
+      self.emit('error', err);
+    });
 
     self.socket = net.createConnection(sockname);
     self.socket.on('connect', function() {
@@ -113,10 +115,12 @@ Client.prototype.connect = function() {
       self.connecting = false;
       self.emit('error', err);
     });
-    self.socket.pipe(self.jstream);
+    self.socket.on('data', function(buf) {
+      self.bunser.append(buf);
+    });
     self.socket.on('end', function() {
       self.socket = null;
-      self.jstream = null;
+      self.bunser = null;
       self.cancelCommands('The watchman connection was closed');
       self.emit('end');
     });
@@ -134,15 +138,40 @@ Client.prototype.connect = function() {
   // We need to ask the client binary where to find it.
   // This will cause the service to start for us if it isn't
   // already running.
-  var watchmanCommand = this.watchmanBinaryPath + ' get-sockname';
-  childProcess.exec(watchmanCommand,
-      function(error, stdout, stderr) {
-    if (error) {
-      self.emit('error', error);
+  var args = ['--no-pretty', 'get-sockname'];
+
+  // We use the more elaborate spawn rather than exec because there
+  // are some error cases on Windows where process spawning can hang.
+  // It is desirable to pipe stderr directly to stderr live so that
+  // we can discover the problem.
+  proc = childProcess.spawn(this.watchmanBinaryPath, args, {
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  var stdout = [];
+  var stderr = [];
+  proc.stdout.on('data', function(data) {
+    stdout.push(data);
+  });
+  proc.stderr.on('data', function(data) {
+    data = data.toString('utf8');
+    stderr.push(data);
+    console.log(data);
+  });
+
+  proc.on('close', function (code) {
+    proc.stderr.end();
+    proc.stdout.end();
+    if (code !== 0) {
+      var why = this.watchmanBinaryPath + args.join(' ') +
+                ' returned with exit code ' + code + ' ' +
+                stderr.join('');
+      console.log(why);
+      self.emit('error', why);
       return;
     }
     try {
-      var obj = JSON.parse(stdout);
+      var obj = JSON.parse(stdout.join(''));
       if ('error' in obj) {
         error = new Error(obj.error);
         error.watchmanResponse = obj;
@@ -183,5 +212,5 @@ Client.prototype.end = function() {
     this.socket.end();
     this.socket = null;
   }
-  this.jstream = null;
+  this.bunser = null;
 }

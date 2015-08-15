@@ -26,6 +26,10 @@ static bool subscription_generator(
       break;
     }
 
+    if (!w_query_file_matches_relative_root(ctx, f)) {
+      continue;
+    }
+
     if (!w_query_process_file(query, ctx, f)) {
       return false;
     }
@@ -45,23 +49,25 @@ static json_t *build_subscription_results(
   struct w_clockspec *since_spec = sub->query->since_spec;
 
   if (since_spec && since_spec->tag == w_cs_clock) {
-    w_log(W_LOG_DBG, "running subscription rules! since %" PRIu32 "\n",
-        since_spec->clock.ticks);
+    w_log(W_LOG_DBG, "running subscription %s rules since %" PRIu32 "\n",
+        sub->name->buf, since_spec->clock.ticks);
   } else {
-    w_log(W_LOG_DBG, "running subscription rules!\n");
+    w_log(W_LOG_DBG, "running subscription %s rules (no since)\n",
+        sub->name->buf);
   }
 
   // Subscriptions never need to sync explicitly; we are only dispatched
   // at settle points which are by definition sync'd to the present time
   sub->query->sync_timeout = 0;
   if (!w_query_execute(sub->query, root, &res, subscription_generator, sub)) {
-    w_log(W_LOG_ERR, "error running subscription query: %s", res.errmsg);
+    w_log(W_LOG_ERR, "error running subscription %s query: %s",
+        sub->name->buf, res.errmsg);
     w_query_result_free(&res);
     return NULL;
   }
 
-  w_log(W_LOG_DBG, "subscription generated %" PRIu32 " results\n",
-      res.num_results);
+  w_log(W_LOG_DBG, "subscription %s generated %" PRIu32 " results\n",
+      sub->name->buf, res.num_results);
 
   if (res.num_results == 0) {
     w_query_result_free(&res);
@@ -173,6 +179,7 @@ static void cmd_subscribe(struct watchman_client *client, json_t *args)
   json_t *query_spec;
   struct w_query_field_list field_list;
   char *errmsg;
+  int defer = true; /* can't use bool because json_unpack requires int */
 
   if (json_array_size(args) != 4) {
     send_error_response(client, "wrong number of arguments for subscribe");
@@ -215,6 +222,10 @@ static void cmd_subscribe(struct watchman_client *client, json_t *args)
 
   sub->name = w_string_new(name);
   sub->query = query;
+
+  json_unpack(query_spec, "{s?:b}", "defer_vcs", &defer);
+  sub->vcs_defer = defer;
+
   memcpy(&sub->field_list, &field_list, sizeof(field_list));
   sub->root = root;
 

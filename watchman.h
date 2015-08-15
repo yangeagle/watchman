@@ -12,7 +12,9 @@ extern "C" {
 #include "config.h"
 
 #include <assert.h>
+#if HAVE_UNISTD_H
 #include <unistd.h>
+#endif
 #include <ctype.h>
 #include <stdint.h>
 #include <sys/stat.h>
@@ -36,11 +38,15 @@ extern "C" {
 #include <stdbool.h>
 #include <sys/time.h>
 #include <time.h>
+#ifndef _WIN32
 #include <libgen.h>
+#endif
 #include <inttypes.h>
 #include <limits.h>
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/un.h>
+#endif
 #include <fcntl.h>
 #if defined(__linux__) && !defined(O_CLOEXEC)
 # define O_CLOEXEC   02000000 /* set close_on_exec, from asm/fcntl.h */
@@ -48,29 +54,52 @@ extern "C" {
 #ifndef O_CLOEXEC
 # define O_CLOEXEC 0
 #endif
+#ifndef _WIN32
 #include <sys/poll.h>
 #include <sys/wait.h>
-#include <fnmatch.h>
+#endif
 #ifdef HAVE_PCRE_H
 # include <pcre.h>
 #endif
 #ifdef HAVE_EXECINFO_H
 # include <execinfo.h>
 #endif
+#ifndef _WIN32
 #include <sys/uio.h>
 #include <pwd.h>
 #include <sysexits.h>
+#endif
 #include <spawn.h>
 #include <stddef.h>
 #ifdef HAVE_SYS_PARAM_H
 # include <sys/param.h>
 #endif
+#ifndef _WIN32
 // Not explicitly exported on Darwin, so we get to define it.
 extern char **environ;
+#endif
+
+#ifdef _WIN32
+# define PRIsize_t "Iu"
+#else
+# define PRIsize_t "zu"
+#endif
+
+#ifndef WATCHMAN_DIR_SEP
+# define WATCHMAN_DIR_SEP '/'
+# define WATCHMAN_DIR_DOT '.'
+#endif
+
+#ifdef _WIN32
+# define PRIsize_t "Iu"
+#else
+# define PRIsize_t "zu"
+#endif
 
 extern char *poisoned_reason;
 
 #include "watchman_hash.h"
+#include "watchman_stream.h"
 
 #include "jansson.h"
 
@@ -84,6 +113,22 @@ extern char *poisoned_reason;
 #define w_paste1(pre, post)  w_paste2(pre, post)
 #define w_gen_symbol(pre)    w_paste1(pre, __LINE__)
 
+// We make use of constructors to glue together modules
+// without maintaining static lists of things in the build
+// configuration.  These are helpers to make this work
+// more portably
+#ifdef _WIN32
+#pragma section(".CRT$XCU", read)
+# define w_ctor_fn_type(sym) void __cdecl sym(void)
+# define w_ctor_fn_reg(sym) \
+  static __declspec(allocate(".CRT$XCU")) \
+    void (__cdecl * w_paste1(sym, _reg))(void) = sym;
+#else
+# define w_ctor_fn_type(sym) \
+  __attribute__((constructor)) void sym(void)
+# define w_ctor_fn_reg(sym) /* not needed */
+#endif
+
 /* sane, reasonably large filename size that we'll use
  * throughout; POSIX seems to define smallish buffers
  * that seem risky */
@@ -96,6 +141,9 @@ extern char *poisoned_reason;
 #if __USE_FORTIFY_LEVEL > 0
 # define ignore_result(x) \
   do { __typeof__(x) _res = x; (void)_res; } while(0)
+#elif _MSC_VER >= 1400
+# define ignore_result(x) \
+  do { int _res = (int)x; (void)_res; } while(0)
 #else
 # define ignore_result(x) x
 #endif
@@ -103,41 +151,62 @@ extern char *poisoned_reason;
 // self-documenting hint to the compiler that we didn't use it
 #define unused_parameter(x)  (void)x
 
-static inline void w_refcnt_add(int *refcnt)
+static inline void w_refcnt_add(volatile long *refcnt)
 {
   (void)__sync_fetch_and_add(refcnt, 1);
 }
 
 /* returns true if we deleted the last ref */
-static inline bool w_refcnt_del(int *refcnt)
+static inline bool w_refcnt_del(volatile long *refcnt)
 {
   return __sync_add_and_fetch(refcnt, -1) == 0;
 }
 
 static inline void w_set_cloexec(int fd)
 {
+#ifndef _WIN32
   ignore_result(fcntl(fd, F_SETFD, FD_CLOEXEC));
+#else
+  unused_parameter(fd);
+#endif
 }
 
 static inline void w_set_nonblock(int fd)
 {
+#ifndef _WIN32
   ignore_result(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK));
+#else
+  unused_parameter(fd);
+#endif
 }
 
 static inline void w_clear_nonblock(int fd)
 {
+#ifndef _WIN32
   ignore_result(fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK));
+#else
+  unused_parameter(fd);
+#endif
 }
 
 // Make a temporary file name and open it.
 // Marks the file as CLOEXEC
-int w_mkstemp(char *templ);
+w_stm_t w_mkstemp(char *templ);
 char *w_realpath(const char *filename);
+bool w_is_path_absolute(const char *path);
+
+#ifndef _WIN32
+static inline bool w_path_exists(const char *path) {
+  return access(path, F_OK) == 0;
+}
+#else
+bool w_path_exists(const char *path);
+#endif
 
 struct watchman_string;
 typedef struct watchman_string w_string_t;
 struct watchman_string {
-  int refcnt;
+  long refcnt;
   uint32_t hval;
   uint32_t len;
   w_string_t *slice;
@@ -329,8 +398,11 @@ struct watchman_query_cookie {
 #define DEFAULT_GC_AGE (86400/2)
 #define DEFAULT_GC_INTERVAL 86400
 
+/* Idle out watches that haven't had activity in several days */
+#define DEFAULT_REAP_AGE (86400*5)
+
 struct watchman_root {
-  int refcnt;
+  long refcnt;
 
   /* path to root */
   w_string_t *root_path;
@@ -356,6 +428,7 @@ struct watchman_root {
   int trigger_settle;
   int gc_interval;
   int gc_age;
+  int idle_reap_age;
 
   /* config options loaded via json file */
   json_t *config_file;
@@ -405,10 +478,11 @@ struct watchman_root {
   uint32_t next_cmd_id;
   uint32_t last_trigger_tick;
   uint32_t pending_trigger_tick;
-  uint32_t last_sub_tick;
   uint32_t pending_sub_tick;
   uint32_t last_age_out_tick;
   time_t last_age_out_timestamp;
+  time_t last_cmd_timestamp;
+  time_t last_reap_timestamp;
 };
 
 enum w_pdu_type {
@@ -428,21 +502,22 @@ typedef struct watchman_json_buffer w_jbuffer_t;
 bool w_json_buffer_init(w_jbuffer_t *jr);
 void w_json_buffer_reset(w_jbuffer_t *jr);
 void w_json_buffer_free(w_jbuffer_t *jr);
-json_t *w_json_buffer_next(w_jbuffer_t *jr, int fd, json_error_t *jerr);
+json_t *w_json_buffer_next(w_jbuffer_t *jr, w_stm_t stm, json_error_t *jerr);
 bool w_json_buffer_passthru(w_jbuffer_t *jr,
     enum w_pdu_type output_pdu,
-    int fd);
-bool w_json_buffer_write(w_jbuffer_t *jr, int fd, json_t *json, int flags);
-bool w_json_buffer_write_bser(w_jbuffer_t *jr, int fd, json_t *json);
+    w_stm_t stm);
+bool w_json_buffer_write(w_jbuffer_t *jr, w_stm_t stm, json_t *json, int flags);
+bool w_json_buffer_write_bser(w_jbuffer_t *jr, w_stm_t stm, json_t *json);
 bool w_ser_write_pdu(enum w_pdu_type pdu_type,
-    w_jbuffer_t *jr, int fd, json_t *json);
+    w_jbuffer_t *jr, w_stm_t stm, json_t *json);
 
 #define BSER_MAGIC "\x00\x01"
 int w_bser_write_pdu(json_t *json, json_dump_callback_t dump, void *data);
 int w_bser_dump(json_t *json, json_dump_callback_t dump, void *data);
-bool bunser_int(const char *buf, int avail, int *needed, json_int_t *val);
+bool bunser_int(const char *buf, json_int_t avail,
+    json_int_t *needed, json_int_t *val);
 json_t *bunser(const char *buf, const char *end,
-    int *needed, json_error_t *jerr);
+    json_int_t *needed, json_error_t *jerr);
 
 struct watchman_client_response {
   struct watchman_client_response *next, *prev;
@@ -452,8 +527,8 @@ struct watchman_client_response {
 struct watchman_client_subscription;
 
 struct watchman_client {
-  int fd;
-  int ping[2];
+  w_stm_t stm;
+  w_evt_t ping;
   int log_level;
   w_jbuffer_t reader, writer;
   bool client_mode;
@@ -476,18 +551,30 @@ bool w_reap_children(bool block);
 #define W_LOG_DBG 2
 #define W_LOG_FATAL 3
 
+#ifndef WATCHMAN_FMT_STRING
+# define WATCHMAN_FMT_STRING(x) x
+#endif
+
 extern int log_level;
 extern char *log_name;
-void w_log(int level, const char *fmt, ...)
+const char *w_set_thread_name(const char *fmt, ...);
+const char *w_get_thread_name(void);
+void w_setup_signal_handlers(void);
+void w_log(int level, WATCHMAN_FMT_STRING(const char *fmt), ...)
 #ifdef __GNUC__
   __attribute__((format(printf, 2, 3)))
 #endif
 ;
 
+bool w_should_log_to_clients(int level);
 void w_log_to_clients(int level, const char *buf);
 
+bool w_is_ignored(w_root_t *root, const char *path, uint32_t pathlen);
 
 w_string_t *w_string_new(const char *str);
+#ifdef _WIN32
+w_string_t *w_string_new_wchar(WCHAR *str, int len);
+#endif
 w_string_t *w_string_make_printf(const char *format, ...);
 w_string_t *w_string_new_lower(const char *str);
 w_string_t *w_string_dup_lower(w_string_t *str);
@@ -503,9 +590,13 @@ bool w_string_equal_cstring(const w_string_t *a, const char *b);
 bool w_string_equal_caseless(const w_string_t *a, const w_string_t *b);
 w_string_t *w_string_dirname(w_string_t *str);
 w_string_t *w_string_basename(w_string_t *str);
+w_string_t *w_string_new_basename(const char *path);
 w_string_t *w_string_canon_path(w_string_t *str);
+void w_string_in_place_normalize_separators(w_string_t **str, char target_sep);
+w_string_t *w_string_normalize_separators(w_string_t *str, char target_sep);
 w_string_t *w_string_path_cat(w_string_t *parent, w_string_t *rhs);
 bool w_string_startswith(w_string_t *str, w_string_t *prefix);
+bool w_string_startswith_caseless(w_string_t *str, w_string_t *prefix);
 w_string_t *w_string_shell_escape(const w_string_t *str);
 w_string_t *w_string_implode(json_t *arr, const char *delim);
 
@@ -515,6 +606,7 @@ w_string_t *w_fstype(const char *path);
 void w_root_crawl_recursive(w_root_t *root, w_string_t *dir_name, time_t now);
 w_root_t *w_root_resolve(const char *path, bool auto_watch, char **errmsg);
 w_root_t *w_root_resolve_for_client_mode(const char *filename, char **errmsg);
+char *w_find_enclosing_root(const char *filename, char **relpath);
 struct watchman_file *w_root_resolve_file(w_root_t *root,
     struct watchman_dir *dir, w_string_t *file_name,
     struct timeval now);
@@ -524,6 +616,7 @@ void w_root_free_watched_roots(void);
 void w_root_schedule_recrawl(w_root_t *root, const char *why);
 bool w_root_cancel(w_root_t *root);
 bool w_root_stop_watch(w_root_t *root);
+json_t *w_root_stop_watch_all(void);
 void w_root_mark_deleted(w_root_t *root, struct watchman_dir *dir,
     struct timeval now, bool recursive);
 void w_root_reap(void);
@@ -598,9 +691,6 @@ void w_run_subscription_rules(
     struct watchman_client_subscription *sub,
     w_root_t *root);
 
-json_t *w_match_results_to_json(
-    uint32_t num_matches,
-    struct watchman_rule_match *matches);
 void w_match_results_free(uint32_t num_matches,
     struct watchman_rule_match *matches);
 
@@ -717,7 +807,6 @@ struct watchman_getopt {
   /* whether we accept an argument */
   enum {
     OPT_NONE,
-    OPT_STRING,
     REQ_STRING,
     REQ_INT,
   } argtype;
@@ -777,6 +866,10 @@ const char *cfg_get_string(w_root_t *root, const char *name,
     const char *defval);
 json_int_t cfg_get_int(w_root_t *root, const char *name,
     json_int_t defval);
+bool cfg_get_bool(w_root_t *root, const char *name, bool defval);
+double cfg_get_double(w_root_t *root, const char *name, double defval);
+const char *cfg_get_trouble_url(void);
+json_t *cfg_compute_root_files(bool *enforcing);
 
 #include "watchman_query.h"
 #include "watchman_cmd.h"
@@ -784,6 +877,8 @@ struct watchman_client_subscription {
   w_root_t *root;
   w_string_t *name;
   w_query *query;
+  bool vcs_defer;
+  uint32_t last_sub_tick;
   struct w_query_field_list field_list;
 };
 
@@ -829,16 +924,20 @@ void handle_open_errno(w_root_t *root, struct watchman_dir *dir,
     const char *reason);
 void stop_watching_dir(w_root_t *root, struct watchman_dir *dir);
 DIR *opendir_nofollow(const char *path);
+uint32_t u32_strlen(const char *str);
 
 extern struct watchman_ops fsevents_watcher;
 extern struct watchman_ops kqueue_watcher;
 extern struct watchman_ops inotify_watcher;
 extern struct watchman_ops portfs_watcher;
+extern struct watchman_ops win32_watcher;
+
+void w_ioprio_set_low(void);
+void w_ioprio_set_normal(void);
 
 #ifdef __cplusplus
 }
 #endif
-
 
 #endif
 

@@ -2,12 +2,74 @@
 /* Copyright 2012-present Facebook, Inc.
  * Licensed under the Apache License, Version 2.0 */
 
-class WatchmanTestCase extends ArcanistPhutilTestCase {
+if (!defined('PHP_BINARY')) {
+  define('PHP_BINARY', 'php');
+}
+
+function w_unlink($name) {
+  if (phutil_is_windows()) {
+    for ($i = 0; $i < 10; $i++) {
+      $x = @unlink($name);
+      if ($x) return true;
+      usleep(200000);
+    }
+  }
+  return unlink($name);
+}
+
+function w_normalize_filename($a) {
+  if ($a === null) {
+    return null;
+  }
+  $a = str_replace('/', DIRECTORY_SEPARATOR, $a);
+  if (DIRECTORY_SEPARATOR == '\\') {
+    return strtolower($a);
+  }
+  return $a;
+}
+
+function w_is_same_filename($a, $b) {
+  return w_normalize_filename($a) == w_normalize_filename($b);
+}
+
+function w_is_file_in_file_list($filename, $list) {
+  $list = w_normalize_file_list($list);
+  $filename = w_normalize_filename($filename);
+  return in_array($filename, $list);
+}
+
+function w_normalize_file_list($a) {
+  return array_map('w_normalize_filename', $a);
+}
+
+function w_is_same_file_list($a, $b) {
+  $a = w_normalize_file_list($a);
+  $b = w_normalize_file_list($b);
+  return $a == $b;
+}
+
+function w_find_subdata_containing_file($subdata, $filename) {
+  if (!is_array($subdata)) {
+    return null;
+  }
+  $filename = w_normalize_filename($filename);
+  foreach ($subdata as $sub) {
+    if (in_array($filename, $sub['files'])) {
+      return $sub;
+    }
+  }
+  return null;
+}
+
+class TestSkipException extends Exception {}
+
+class WatchmanTestCase {
   protected $root;
   protected $watchman_instance;
   private $use_cli = false;
   private $cli_args = null;
   private $watches = array();
+  static $test_number = 1;
 
   // If this returns false, we can run this test case using
   // the CLI instead of via a unix socket
@@ -24,10 +86,7 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
     $this->cli_args = $args;
   }
 
-  // because setProjectRoot is final and $this->projectRoot
-  // is private...
   function setRoot($root) {
-    $this->setProjectRoot($root);
     $this->root = $root;
   }
 
@@ -44,16 +103,31 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
     $this->watchman_instance = $instance;
   }
 
+  function watchProject($root) {
+    $res = $this->watchmanCommand('watch-project', $root);
+    if (!is_array($res)) {
+      $err = $res;
+    } else {
+      $err = idx($res, 'error');
+    }
+    if (!$err) {
+      // Remember the watched dir
+      $this->watches[$root] = idx($res, 'watch');
+    }
+    return $res;
+  }
+
   function watch($root, $assert = true) {
+    $root = w_normalize_filename($root);
     $res = $this->watchmanCommand('watch', $root);
     $this->watches[$root] = $res;
     if ($assert) {
       if (!is_array($res)) {
         $err = $res;
       } else {
-        $err = idx($res, 'error', idx($res, 'watch'));
+        $err = idx($res, 'error', w_normalize_filename(idx($res, 'watch')));
       }
-      $this->assertEqual($root, $err);
+      $this->assertEqual(w_normalize_filename($root), $err);
     }
     return $res;
   }
@@ -109,8 +183,8 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
     if (!$this->use_cli) {
       $this->watchman_instance->stopLogging();
     }
-    $this->logTestInfo('end', $test_method_name);
     chdir($this->root);
+    $this->logTestInfo('end', $test_method_name);
   }
 
   function willRunOneTest($test_method_name) {
@@ -125,13 +199,12 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
   function didRunTests() {
     $this->logTestInfo('didRun');
 
-    foreach ($this->watches as $root => $status) {
-      try {
-        $this->watchmanCommand('watch-del', $root);
-      } catch (Exception $e) {
-        // Swallow
-      }
+    try {
+      $this->watchmanCommand('watch-del-all');
+    } catch (Exception $e) {
+      // Swallow
     }
+
     $this->watches = array();
   }
 
@@ -147,12 +220,6 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
       );
       return $future->resolve();
     }
-
-    $console = PhutilConsole::getConsole();
-    $console->writeLog(
-      "sock query: %s\n",
-      json_encode($args)
-    );
 
     return call_user_func_array(
       array($this->watchman_instance, 'request'),
@@ -280,7 +347,7 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
       $message = "Condition [$callable] was not met in $timeout seconds";
     }
     if (is_callable($message)) {
-      $message = $message();
+      $message = call_user_func($message);
     }
     if (is_string($res)) {
       $message .= " $res";
@@ -378,7 +445,8 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
     list($ok, $out) = $this->waitForWatchmanNoThrow(
       array('find', $root),
       function ($out) use ($sort_func, $files) {
-        return $sort_func(idx($out, 'files', array())) === $files;
+        return w_is_same_file_list(
+          $sort_func(idx($out, 'files', array())), $files);
       },
       0 // timeout
     );
@@ -394,7 +462,7 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
       $since = $this->watchmanCommand('since', $root, $cursor);
 
       $since_files = $sort_func(idx($since, 'files'));
-      if ($since_files === $files_via_since) {
+      if (w_is_same_file_list($since_files, $files_via_since)) {
         $this->assertTrue(true);
         return $since;
       }
@@ -438,7 +506,24 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
         json_encode($out) . "\n" . $where;
     }
 
-    $this->assertEqual($files, $got, $message);
+    $this->assertEqualFileList($files, $got, $message);
+  }
+
+  function assertEqualFileList($a, $b, $message = null) {
+    if ($message === null) {
+      $where = debug_backtrace();
+      $where = array_shift($where);
+      $where = sprintf("at line %d in file %s",
+        idx($where, 'line'),
+        basename(idx($where, 'file')));
+
+      $message = "\nfile lists are not equal $where";
+    }
+    $a = w_normalize_file_list($a);
+    sort($a);
+    $b = w_normalize_file_list($b);
+    sort($b);
+    $this->assertEqual($a, $b, $message);
   }
 
   function assertFileList($root, array $files, $message = null) {
@@ -478,7 +563,8 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
       $timeout,
       function () use ($filename, $content) {
         $got = @file_get_contents($filename);
-        return "wait for $filename to hold $content, got $got";
+        return "Wanted: $content\nGot:    $got\n".
+               "wait for $filename to hold a certain content";
       }
     );
     return @file_get_contents($filename);
@@ -486,7 +572,8 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
 
   function assertFileContents($filename, $content, $timeout = 5) {
     $got = $this->waitForFileContents($filename, $content, $timeout);
-    $this->assertEqual($got, $content);
+    $this->assertEqual($got, $content,
+        "waiting for $filename to have a certain content");
   }
 
   function waitForFileToHaveNLines($filename, $nlines, $timeout = 5) {
@@ -526,12 +613,134 @@ class WatchmanTestCase extends ArcanistPhutilTestCase {
   function isCaseInsensitive() {
     static $insensitive = null;
     if ($insensitive === null) {
-      $dir = PhutilDirectoryFixture::newEmptyFixture();
+      $dir = new WatchmanDirectoryFixture();
       $path = $dir->getPath();
       touch("$path/a");
       $insensitive = file_exists("$path/A");
     }
     return $insensitive;
+  }
+
+  function run() {
+    $ref = new ReflectionClass($this);
+    $methods = $ref->getMethods();
+    shuffle($methods);
+    $this->willRunTests();
+    foreach ($methods as $method) {
+      $name = $method->getName();
+      if (!preg_match('/^test/', $name)) {
+        continue;
+      }
+
+      try {
+        $this->willRunOneTest($name);
+
+        call_user_func(array($this, $name));
+
+        try {
+          $this->didRunOneTest($name);
+        } catch (Exception $e) {
+          $this->failException($e);
+        }
+
+      } catch (TestSkipException $e) {
+        // Continue with next
+      } catch (Exception $e) {
+        $this->failException($e);
+      }
+    }
+    $this->didRunTests();
+  }
+
+  function failException($e) {
+    $this->fail(sprintf("%s: %s\n%s",
+      get_class($e),
+      $e->getMessage(),
+      $e->getTraceAsString()));
+  }
+
+  function printStatus($ok, $message) {
+    $lines = explode("\n", $message);
+    if (count($lines) > 1) {
+      echo '# ' . implode("\n# ", $lines) . "\n";
+    }
+    $last_line = array_pop($lines);
+    $caller = self::getCallerInfo();
+
+    printf("%s %d - %s:%d: %s\n",
+      $ok ? 'ok' : 'not ok',
+      self::$test_number++,
+      $caller['file'],
+      $caller['line'],
+      $last_line);
+  }
+
+  function fail($message) {
+    $this->printStatus(false, $message);
+    throw new TestSkipException();
+  }
+
+  function ok($message) {
+    $this->printStatus(true, $message);
+  }
+
+
+  /**
+   * Returns info about the caller function.
+   *
+   * @return map
+   */
+  private static final function getCallerInfo() {
+    $caller = array();
+
+    foreach (array_slice(debug_backtrace(), 1) as $location) {
+      $function = idx($location, 'function');
+
+      if (idx($location, 'file') == __FILE__) {
+        continue;
+      }
+      $caller = $location;
+      break;
+    }
+
+    return array(
+      'file' => basename(idx($caller, 'file')),
+      'line' => idx($caller, 'line'),
+    );
+  }
+
+  static function printable($value) {
+    return json_encode($value);
+  }
+
+  function assertEqual($expected, $actual, $message = null) {
+    if ($message === null) {
+      $message = sprintf("Expected %s to equal %s",
+        self::printable($actual),
+        self::printable($expected));
+    }
+    if ($expected === $actual) {
+      $this->ok($message);
+    } else {
+      $this->fail($message);
+    }
+  }
+
+  function assertTrue($actual, $message = null) {
+    $this->assertEqual(true, $actual, $message);
+  }
+
+  function assertFalse($actual, $message = null) {
+    $this->assertEqual(false, $actual, $message);
+  }
+
+  function assertFailure($message) {
+    return $this->fail($message);
+  }
+
+  function assertSkipped($message) {
+    $this->ok("skip: $message");
+    throw new TestSkipException();
   }
 }
 

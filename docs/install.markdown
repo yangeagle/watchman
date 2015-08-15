@@ -31,6 +31,7 @@ To build the most recent release currently tracked by
 [Homebrew](http://brew.sh/):
 
 ```bash
+$ brew update
 $ brew install watchman
 ```
 
@@ -38,6 +39,14 @@ To install the latest build from github:
 
 ```bash
 $ brew install --HEAD watchman
+```
+
+### Installing on OS X via macports
+
+To install the package maintained by [MacPorts](https://www.macports.org):
+
+```bash
+$ sudo port install watchman
 ```
 
 ### Installing from source

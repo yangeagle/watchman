@@ -10,8 +10,9 @@
 
 void usage(struct watchman_getopt *opts, FILE *where)
 {
-  int i, len;
-  int longest = 0;
+  int i;
+  size_t len;
+  size_t longest = 0;
   const char *label;
 
   fprintf(where, "Usage: watchman [opts] command\n");
@@ -22,9 +23,6 @@ void usage(struct watchman_getopt *opts, FILE *where)
 
     len = strlen(opts[i].optname);
     switch (opts[i].argtype) {
-      case OPT_STRING:
-        len += strlen(label) + strlen("[=]");
-        break;
       case REQ_STRING:
         len += strlen(label) + strlen("=");
         break;
@@ -56,9 +54,6 @@ void usage(struct watchman_getopt *opts, FILE *where)
       fprintf(where, "    ");
     }
     switch (opts[i].argtype) {
-      case OPT_STRING:
-        snprintf(buf, sizeof(buf), "--%s[=%s]", opts[i].optname, label);
-        break;
       case REQ_STRING:
         snprintf(buf, sizeof(buf), "--%s=%s", opts[i].optname, label);
         break;
@@ -67,7 +62,7 @@ void usage(struct watchman_getopt *opts, FILE *where)
         break;
     }
 
-    fprintf(where, "%-*s ", longest, buf);
+    fprintf(where, "%-*s ", (unsigned int)longest, buf);
 
     if (opts[i].helptext) {
       fprintf(where, "%s", opts[i].helptext);
@@ -82,7 +77,7 @@ void usage(struct watchman_getopt *opts, FILE *where)
 "See https://github.com/facebook/watchman#watchman for more help\n"
 "\n"
 "Watchman, by Wez Furlong.\n"
-"Copyright 2012-2014 Facebook, Inc.\n"
+"Copyright 2012-2015 Facebook, Inc.\n"
   );
 
   exit(1);
@@ -139,9 +134,6 @@ bool w_getopt(struct watchman_getopt *opts, int *argcp, char ***argvp,
       case OPT_NONE:
         long_opts[i].has_arg = no_argument;
         break;
-      case OPT_STRING:
-        long_opts[i].has_arg = optional_argument;
-        break;
       case REQ_STRING:
       case REQ_INT:
         long_opts[i].has_arg = required_argument;
@@ -149,7 +141,7 @@ bool w_getopt(struct watchman_getopt *opts, int *argcp, char ***argvp,
     }
 
     if (opts[i].shortopt) {
-      nextshort[0] = opts[i].shortopt;
+      nextshort[0] = (char)opts[i].shortopt;
       nextshort++;
 
       if (long_opts[i].has_arg != no_argument) {
@@ -220,7 +212,6 @@ bool w_getopt(struct watchman_getopt *opts, int *argcp, char ***argvp,
               break;
             }
             case REQ_STRING:
-            case OPT_STRING:
             {
               json_t *sval = json_string(optarg);
               *(char**)o->val = strdup(optarg);

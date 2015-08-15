@@ -7,9 +7,19 @@ class triggerTestCase extends WatchmanTestCase {
     return true;
   }
 
+  function getGlobalConfig() {
+    return array(
+      // We need to run our own instance so that we can look in
+      // the log file
+      'dummy' => true
+    );
+  }
+
   function doesTriggerDataMatchFileList($root, array $files) {
-    if (!file_exists("$root/trigger.json")) {
-      return false;
+    $trigger_json = $root . DIRECTORY_SEPARATOR . 'trigger.json';
+
+    if (!file_exists($trigger_json)) {
+      return array(false, 'no such file');
     }
 
     // Validate that the json input is properly formatted
@@ -26,7 +36,7 @@ class triggerTestCase extends WatchmanTestCase {
 
     $lines = 0;
     $got = array();
-    foreach (@file("$root/trigger.json") as $line) {
+    foreach (@file($trigger_json) as $line) {
       $lines++;
       $list = json_decode($line, true);
       // Filter out the unpredictable data from lstat()
@@ -45,14 +55,23 @@ class triggerTestCase extends WatchmanTestCase {
         $got[] = $ele;
       }
     }
+    $got = array_unique($got, SORT_REGULAR);
 
-    return $expect === $got;
+    if ($expect === $got) {
+      return array(true, 'matches');
+    }
+
+    return array(false, "expect: ".json_encode($expect) .
+      " got: " . json_encode($got));
   }
 
   function validateTriggerOutput($root, array $files, $context) {
-    $this->waitFor(function () use ($root, $files) {
-      if (file_exists("$root/trigger.log")) {
-        $dat = file_get_contents("$root/trigger.log");
+    $trigger_log = $root . DIRECTORY_SEPARATOR . "trigger.log";
+    $trigger_json = $root . DIRECTORY_SEPARATOR . "trigger.json";
+
+    $this->waitFor(function () use ($root, $files, $trigger_log) {
+      if (file_exists($trigger_log)) {
+        $dat = file_get_contents($trigger_log);
         $n = 0;
         foreach ($files as $file) {
           if (strpos($dat, $file) !== false) {
@@ -62,38 +81,40 @@ class triggerTestCase extends WatchmanTestCase {
         return $n == count($files);
       }
       return false;
-    }, 5, function () use ($root, $files, $context) {
+    }, 5, function () use ($root, $files, $context, $trigger_log) {
       return sprintf(
-        "[$context] trigger.log should contain %s, has %s",
+        "[$context] $trigger_log should contain %s, has %s",
         json_encode($files),
-        file_get_contents("$root/trigger.log")
+        file_get_contents($trigger_log)
       );
     });
 
-    $logdata = file_get_contents("$root/trigger.log");
+    $logdata = file_get_contents($trigger_log);
     foreach ($files as $file) {
       $this->assertRegex(
         "/$file/m",
         $logdata,
-        "[$context] got the right filename in the log"
+        "[$context] got the right filename in $trigger_log"
       );
     }
 
     $self = $this;
     $this->waitFor(function () use ($root, $files, $self) {
-      return $self->doesTriggerDataMatchFileList($root, $files);
-    }, 5, function () use ($root, $files, $context) {
+      list ($ok, $why) = $self->doesTriggerDataMatchFileList($root, $files);
+      return $ok;
+    }, 5, function () use ($root, $files, $context, $self, $trigger_json) {
+      list ($ok, $why) = $self->doesTriggerDataMatchFileList($root, $files);
       return sprintf(
-        "[$context] trigger.json holds valid json for %s, got %s",
+        "[$context] trigger.json holds valid json for %s: %s",
         json_encode($files),
-        file_get_contents("$root/trigger.json")
+        $why
       );
     });
   }
 
   function testLegacyTrigger() {
-    $dir = PhutilDirectoryFixture::newEmptyFixture();
-    $root = realpath($dir->getPath());
+    $dir = new WatchmanDirectoryFixture();
+    $root = $dir->getPath();
 
     touch("$root/foo.c");
     touch("$root/b ar.c");
@@ -110,21 +131,24 @@ class triggerTestCase extends WatchmanTestCase {
     ));
 
     $res = $this->trigger($root,
-      'test', '*.c', '--', dirname(__FILE__) . '/trig.sh',
-      "$root/trigger.log");
+      'test', '*.c', '--', PHP_BINARY,
+      dirname(__FILE__) . DIRECTORY_SEPARATOR . '_trig.php',
+      $root . DIRECTORY_SEPARATOR . "trigger.log");
     $this->assertEqual('created', idx($res, 'disposition'));
 
     $this->trigger($root,
-      'other', '*.c', '--', dirname(__FILE__) . '/trigjson',
-      "$root/trigger.json");
+      'other', '*.c', '--', PHP_BINARY,
+      dirname(__FILE__) . DIRECTORY_SEPARATOR . '_trigjson.php',
+      $root . DIRECTORY_SEPARATOR . "trigger.json");
 
     $trig_list = array(
       array(
         'append_files' => true,
         'name' => 'other',
         'command' => array(
-          dirname(__FILE__) . '/trigjson',
-          "$root/trigger.json"
+          PHP_BINARY,
+          dirname(__FILE__) . DIRECTORY_SEPARATOR . '_trigjson.php',
+          $root . DIRECTORY_SEPARATOR . "trigger.json"
         ),
         'expression' => array(
           'anyof',
@@ -136,8 +160,9 @@ class triggerTestCase extends WatchmanTestCase {
         'append_files' => true,
         'name' => 'test',
         'command' => array(
-          dirname(__FILE__) . '/trig.sh',
-          "$root/trigger.log"
+          PHP_BINARY,
+          dirname(__FILE__) . DIRECTORY_SEPARATOR . '_trig.php',
+          $root . DIRECTORY_SEPARATOR . "trigger.log"
         ),
         'expression' => array(
           'anyof',
@@ -159,7 +184,7 @@ class triggerTestCase extends WatchmanTestCase {
 
     $this->watchmanCommand('log', 'debug', 'waiting for spawnp ' . __LINE__);
     $this->assertWaitForLog('/posix_spawnp/');
-    $this->assertWaitForLogOutput('/WOOT from trig.sh/');
+    $this->assertWaitForLogOutput('/WOOT from trig/');
 
     $this->stopLogging();
 
@@ -169,15 +194,15 @@ class triggerTestCase extends WatchmanTestCase {
       // Validate that we observe the updates correctly
       // (that we're handling the since portion of the query)
       $this->suspendWatchman();
-      unlink("$root/trigger.log");
-      unlink("$root/trigger.json");
+      w_unlink("$root/trigger.log");
+      w_unlink("$root/trigger.json");
       touch("$root/$file");
       $this->resumeWatchman();
       $this->validateTriggerOutput($root, array($file), "single $file");
     }
 
-    unlink("$root/trigger.log");
-    unlink("$root/trigger.json");
+    w_unlink("$root/trigger.log");
+    w_unlink("$root/trigger.json");
 
     // When running under valgrind, there may be pending events.
     // Let's give things a chance to finish dispatching before proceeding
@@ -185,8 +210,8 @@ class triggerTestCase extends WatchmanTestCase {
       return file_exists("$root/trigger.log");
     }, 1);
 
-    @unlink("$root/trigger.log");
-    @unlink("$root/trigger.json");
+    @w_unlink("$root/trigger.log");
+    @w_unlink("$root/trigger.json");
 
     $this->startLogging('debug');
 

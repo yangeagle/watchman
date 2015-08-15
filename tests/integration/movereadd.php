@@ -7,8 +7,8 @@ class movereaddTestCase extends WatchmanTestCase {
     if (PHP_OS == 'Linux' && getenv('TRAVIS')) {
       $this->assertSkipped('openvz and inotify unlinks == bad time');
     }
-    $dir = PhutilDirectoryFixture::newEmptyFixture();
-    $root = realpath($dir->getPath());
+    $dir = new WatchmanDirectoryFixture();
+    $root = $dir->getPath();
     mkdir("$root/foo");
     $watch = $this->watch($root);
 
@@ -37,7 +37,7 @@ class movereaddTestCase extends WatchmanTestCase {
     mkdir("$root/foo/bar");
 
     $since = array('foo/bar');
-    if (PHP_OS == 'SunOS') {
+    if (PHP_OS == 'SunOS' || phutil_is_windows()) {
       // This makes me sad, but Solaris reports the parent dir
       // as changed when we mkdir within it
       array_unshift($since, 'foo');
@@ -83,4 +83,3 @@ class movereaddTestCase extends WatchmanTestCase {
     );
   }
 }
-

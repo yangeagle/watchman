@@ -5,14 +5,19 @@
 
 class SinceExprTestCase extends WatchmanTestCase {
   function testSinceExpr() {
-    $dir = PhutilDirectoryFixture::newEmptyFixture();
-    $root = realpath($dir->getPath());
+    $dir = new WatchmanDirectoryFixture();
+    $root = $dir->getPath();
 
     touch("$root/foo.c");
     mkdir("$root/subdir");
     touch("$root/subdir/bar.txt");
 
     $this->watch($root);
+    $this->assertFileList($root, array(
+      'foo.c',
+      'subdir',
+      'subdir/bar.txt'
+    ));
 
     $foo_data = $this->watchmanCommand('find', $root, 'foo.c');
     $first_clock = $foo_data['clock'];
